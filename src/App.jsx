@@ -30,9 +30,9 @@ async function sbFetch(path, opts = {}) {
 const db = {
   // Clients
   getClients: () => sbFetch("clients?select=*&order=created_at.desc"),
-  upsertClient: (c) => sbFetch("clients", {
-    method: "POST", prefer: "return=representation",
-    headers: { "Prefer": "resolution=merge-duplicates,return=representation" },
+  insertClient: (c) => sbFetch("clients", {
+    method: "POST",
+    headers: { "Prefer": "return=representation" },
     body: JSON.stringify({
       id: c.id, name: c.name, goal: c.goal, frequency: c.frequency,
       injuries: c.injuries, preferred_exercises: c.preferredExercises,
@@ -40,17 +40,35 @@ const db = {
       notes: c.notes, created_at: c.createdAt, ai_analyses: c.aiAnalyses ?? [],
     }),
   }),
+  updateClient: (c) => sbFetch(`clients?id=eq.${c.id}`, {
+    method: "PATCH",
+    headers: { "Prefer": "return=representation" },
+    body: JSON.stringify({
+      name: c.name, goal: c.goal, frequency: c.frequency,
+      injuries: c.injuries, preferred_exercises: c.preferredExercises,
+      disliked_exercises: c.dislikedExercises, current_focus: c.currentFocus,
+      notes: c.notes, ai_analyses: c.aiAnalyses ?? [],
+    }),
+  }),
   deleteClient: (id) => sbFetch(`clients?id=eq.${id}`, { method: "DELETE", prefer: "" }),
 
   // Trainings
   getTrainings: (clientId) => sbFetch(`trainings?client_id=eq.${clientId}&order=date.desc,created_at.desc`),
-  upsertTraining: (t, clientId) => sbFetch("trainings", {
-    method: "POST", prefer: "return=representation",
-    headers: { "Prefer": "resolution=merge-duplicates,return=representation" },
+  insertTraining: (t, clientId) => sbFetch("trainings", {
+    method: "POST",
+    headers: { "Prefer": "return=representation" },
     body: JSON.stringify({
       id: t.id, client_id: clientId, date: t.date, energy: t.energy,
       complaints: t.complaints, notes: t.notes, next_focus: t.nextFocus,
       exercises: t.exercises ?? [],
+    }),
+  }),
+  updateTraining: (t) => sbFetch(`trainings?id=eq.${t.id}`, {
+    method: "PATCH",
+    headers: { "Prefer": "return=representation" },
+    body: JSON.stringify({
+      date: t.date, energy: t.energy, complaints: t.complaints,
+      notes: t.notes, next_focus: t.nextFocus, exercises: t.exercises ?? [],
     }),
   }),
   deleteTraining: (id) => sbFetch(`trainings?id=eq.${id}`, { method: "DELETE", prefer: "" }),
@@ -156,7 +174,8 @@ const fmtShort = (iso) => { if(!iso) return ""; return new Date(iso+(iso.length=
 const uid = () => Date.now().toString()+Math.random().toString(36).slice(2);
 
 const blankClient   = () => ({id:uid(),name:"",goal:"algemeen",frequency:"",injuries:"",preferredExercises:"",dislikedExercises:"",currentFocus:"",notes:"",createdAt:new Date().toISOString(),trainings:[],aiAnalyses:[]});
-const blankExercise = () => ({id:uid(),name:"",sets:"",reps:"",weight:"",rpe:"",technique:"",note:""});
+const blankExercise = () => ({id:uid(),name:"",sets:"",reps:"",weight:"",rpe:"",technique:"",note:"",setData:[]});
+const blankSet = () => ({id:uid(),reps:"",weight:"",rpe:""});
 const blankTraining = () => ({id:uid(),date:new Date().toISOString().slice(0,10),energy:"",complaints:"",notes:"",nextFocus:"",exercises:[blankExercise()]});
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,7 +330,7 @@ export default function App() {
     try {
       const isNew = !clients.find(c=>c.id===data.id);
       const clientData = isNew ? {...blankClient(),...data,id:uid(),createdAt:new Date().toISOString()} : {...data};
-      await db.upsertClient(clientData);
+      if (isNew) { await db.insertClient(clientData); } else { await db.updateClient(clientData); }
       if (isNew) {
         setClients(p=>[{...clientData,trainings:[]},...p]);
         setClientId(clientData.id);
@@ -335,7 +354,7 @@ export default function App() {
   // Training CRUD
   const saveTraining = async (t) => {
     try {
-      await db.upsertTraining(t, clientId);
+      const tExists = clients.find(c=>c.id===clientId)?.trainings?.find(x=>x.id===t.id); if (tExists) { await db.updateTraining(t); } else { await db.insertTraining(t, clientId); }
       setClients(p=>p.map(c=>{
         if(c.id!==clientId) return c;
         const exists = c.trainings?.find(x=>x.id===t.id);
@@ -357,7 +376,7 @@ export default function App() {
   // Groepstraining
   const saveGroupTrainings = async (trainingsMap) => {
     try {
-      await Promise.all(Object.entries(trainingsMap).map(([cId,t]) => db.upsertTraining(t,cId)));
+      await Promise.all(Object.entries(trainingsMap).map(([cId,t]) => db.insertTraining(t,cId)));
       setClients(p=>p.map(c=>{
         const t = trainingsMap[c.id]; if(!t) return c;
         return {...c, trainings:[t,...(c.trainings??[])]};
@@ -371,7 +390,7 @@ export default function App() {
     const c = clients.find(x=>x.id===cId); if(!c) return;
     const updated = [analysis,...(c.aiAnalyses??[])].slice(0,3);
     try {
-      await db.upsertClient({...c, aiAnalyses: updated});
+      await db.updateClient({...c, aiAnalyses: updated});
       setClients(p=>p.map(x=>x.id===cId?{...x,aiAnalyses:updated}:x));
     } catch(e) {}
   };
@@ -594,6 +613,176 @@ function ClientProfile({client,onEdit,onDelete,onNewTraining,onOpenTraining,onPr
   );
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXERCISE BLOCK (sets apart invullen)
+// ─────────────────────────────────────────────────────────────────────────────
+const RPE_LABELS = {
+  1:"Heel licht",2:"Licht",3:"Matig",4:"Redelijk",5:"Gemiddeld",
+  6:"Zwaar",7:"Zwaar (3 reps over)",8:"Zwaar (2 reps over)",
+  9:"Zeer zwaar (1 rep over)",10:"Maximaal"
+};
+
+function ExerciseBlock({ex,idx,canRemove,onRemove,onChange,onSetChange,onAddSet,onRemoveSet}) {
+  const [showRpeInfo,setShowRpeInfo] = useState(false);
+  const useSets = ex.setData && ex.setData.length > 0;
+
+  const copyToAll = () => {
+    if(!ex.setData?.length) return;
+    const first = ex.setData[0];
+    ex.setData.forEach(s => {
+      if(s.id !== first.id) {
+        onSetChange(s.id,"reps",first.reps);
+        onSetChange(s.id,"weight",first.weight);
+        onSetChange(s.id,"rpe",first.rpe);
+      }
+    });
+  };
+
+  return (
+    <div style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 18px",marginBottom:10}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <span style={{fontSize:12,fontWeight:700,color:ex.name?C.textMid:C.textLow}}>{ex.name||`Oefening ${idx+1}`}</span>
+        {canRemove&&<button style={{...T.btnGhost,color:C.red,fontSize:12}} onClick={onRemove}>✕</button>}
+      </div>
+
+      {/* Naam + techniek */}
+      <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:"10px 14px",marginBottom:14}}>
+        <div style={T.fg}>
+          <label style={T.lbl}>Oefening</label>
+          <input style={T.input} value={ex.name} placeholder="Typ of kies hierboven" onChange={e=>onChange("name",e.target.value)} />
+        </div>
+        <div style={T.fg}>
+          <label style={T.lbl}>Techniek (★)</label>
+          <select style={T.select} value={ex.technique} onChange={e=>onChange("technique",e.target.value)}>
+            <option value="">—</option>
+            <option value="1">1★ – Moet verbeteren</option>
+            <option value="2">2★★ – Ruimte</option>
+            <option value="3">3★★★ – Acceptabel</option>
+            <option value="4">4★★★★ – Goed</option>
+            <option value="5">5★★★★★ – Uitstekend</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Sets modus toggle */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <span style={{fontSize:11,fontWeight:700,color:C.textLow,textTransform:"uppercase",letterSpacing:"0.06em"}}>
+          {useSets ? `${ex.setData.length} sets` : "Sets & gewicht"}
+        </span>
+        <div style={{display:"flex",gap:8}}>
+          {useSets && ex.setData.length > 1 && (
+            <button style={{...T.btnGhost,fontSize:11,color:C.accent}} onClick={copyToAll}>
+              ⎘ Kopieer set 1 naar alle
+            </button>
+          )}
+          <button style={{...T.btnGhost,fontSize:11,color:useSets?C.red:C.accent}}
+            onClick={()=>{
+              if(useSets){onChange("setData",[])}
+              else{onAddSet();}
+            }}>
+            {useSets?"− Terug naar algemeen":"+ Per set invullen"}
+          </button>
+        </div>
+      </div>
+
+      {/* Per set invullen */}
+      {useSets ? (
+        <div>
+          {/* RPE uitleg knop */}
+          <div style={{marginBottom:8}}>
+            <button style={{...T.btnGhost,fontSize:11,color:C.textLow}} onClick={()=>setShowRpeInfo(p=>!p)}>
+              ❓ Wat is RPE?
+            </button>
+            {showRpeInfo&&(
+              <div style={{background:"#1a2236",border:`1px solid ${C.accentDim}`,borderRadius:8,padding:"12px 14px",marginTop:8,fontSize:12,color:C.textMid,lineHeight:1.7}}>
+                <strong style={{color:C.accent}}>RPE = Rate of Perceived Exertion</strong> — hoe zwaar voelde de set aan?<br/>
+                <strong style={{color:C.text}}>RPE 6</strong> — nog 4+ reps over &nbsp;
+                <strong style={{color:C.text}}>RPE 7</strong> — nog 3 reps &nbsp;
+                <strong style={{color:C.text}}>RPE 8</strong> — nog 2 reps &nbsp;
+                <strong style={{color:C.text}}>RPE 9</strong> — nog 1 rep &nbsp;
+                <strong style={{color:C.red}}>RPE 10</strong> — absoluut maximum
+              </div>
+            )}
+          </div>
+
+          {/* Set rows */}
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead>
+                <tr>
+                  <th style={{...T.th,width:40}}>Set</th>
+                  <th style={T.th}>Reps</th>
+                  <th style={T.th}>Gewicht (kg)</th>
+                  <th style={T.th}>RPE</th>
+                  <th style={{...T.th,width:32}}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {ex.setData.map((s,i)=>(
+                  <tr key={s.id}>
+                    <td style={{...T.td,color:C.textLow,fontWeight:700,textAlign:"center"}}>#{i+1}</td>
+                    <td style={T.td}>
+                      <input style={{...T.input,padding:"6px 8px"}} type="number" min="0" value={s.reps} placeholder="8"
+                        onChange={e=>onSetChange(s.id,"reps",e.target.value)} />
+                    </td>
+                    <td style={T.td}>
+                      <input style={{...T.input,padding:"6px 8px"}} type="number" min="0" step="0.5" value={s.weight} placeholder="80"
+                        onChange={e=>onSetChange(s.id,"weight",e.target.value)} />
+                    </td>
+                    <td style={T.td}>
+                      <select style={{...T.select,padding:"6px 8px"}} value={s.rpe} onChange={e=>onSetChange(s.id,"rpe",e.target.value)}>
+                        <option value="">—</option>
+                        {[6,7,8,9,10].map(n=><option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </td>
+                    <td style={T.td}>
+                      {ex.setData.length>1&&(
+                        <button style={{...T.btnGhost,color:C.red,fontSize:12}} onClick={()=>onRemoveSet(s.id)}>✕</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button style={{...T.btnSec,marginTop:8,fontSize:12,padding:"6px 12px"}} onClick={onAddSet}>
+            + Set toevoegen
+          </button>
+        </div>
+      ) : (
+        /* Algemeen invullen */
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:"10px 14px"}}>
+          {[["sets","Sets","4"],["reps","Reps","8"],["weight","Gewicht (kg)","80"]].map(([k,l,ph])=>(
+            <div key={k} style={T.fg}>
+              <label style={T.lbl}>{l}</label>
+              <input style={T.input} type="number" min="0" step={k==="weight"?"0.5":"1"} value={ex[k]} placeholder={ph}
+                onChange={e=>onChange(k,e.target.value)} />
+            </div>
+          ))}
+          <div style={T.fg}>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
+              <label style={T.lbl}>RPE (1–10)</label>
+            </div>
+            <select style={T.select} value={ex.rpe} onChange={e=>onChange("rpe",e.target.value)}>
+              <option value="">—</option>
+              {[1,2,3,4,5,6,7,8,9,10].map(n=><option key={n} value={n}>{n} – {RPE_LABELS[n]}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
+
+      {/* Opmerking */}
+      <div style={{...T.fg,marginTop:12}}>
+        <label style={T.lbl}>Opmerking</label>
+        <input style={T.input} value={ex.note} placeholder="bijv. knieën meer naar buiten"
+          onChange={e=>onChange("note",e.target.value)} />
+      </div>
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TRAINING FORM
 // ─────────────────────────────────────────────────────────────────────────────
@@ -661,19 +850,13 @@ function TrainingForm({client,training,equipment,onSave,onCancel,toast}) {
             </div>
           )}
           {form.exercises.map((ex,idx)=>(
-            <div key={ex.id} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"16px 18px",marginBottom:10}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-                <span style={{fontSize:12,fontWeight:700,color:ex.name?C.textMid:C.textLow}}>{ex.name||`Oefening ${idx+1}`}</span>
-                {form.exercises.length>1&&<button style={{...T.btnGhost,color:C.red,fontSize:12}} onClick={()=>removeEx(ex.id)}>✕</button>}
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:"10px 14px"}}>
-                <div style={{...T.fg,gridColumn:"1 / -1"}}><label style={T.lbl}>Oefening</label><input style={T.input} value={ex.name} placeholder="Typ of kies hierboven" onChange={e=>setEx(ex.id,"name",e.target.value)} /></div>
-                {[["sets","Sets","4"],["reps","Reps","8"],["weight","Gewicht (kg)","80"]].map(([k,l,ph])=>(<div key={k} style={T.fg}><label style={T.lbl}>{l}</label><input style={T.input} type="number" min="0" step={k==="weight"?"0.5":"1"} value={ex[k]} placeholder={ph} onChange={e=>setEx(ex.id,k,e.target.value)} /></div>))}
-                <div style={T.fg}><label style={T.lbl}>RPE (1–10)</label><select style={T.select} value={ex.rpe} onChange={e=>setEx(ex.id,"rpe",e.target.value)}><option value="">—</option>{[1,2,3,4,5,6,7,8,9,10].map(n=><option key={n} value={n}>{n}</option>)}</select></div>
-                <div style={T.fg}><label style={T.lbl}>Techniek (★)</label><select style={T.select} value={ex.technique} onChange={e=>setEx(ex.id,"technique",e.target.value)}><option value="">—</option><option value="1">1★ – Moet verbeteren</option><option value="2">2★★ – Ruimte</option><option value="3">3★★★ – Acceptabel</option><option value="4">4★★★★ – Goed</option><option value="5">5★★★★★ – Uitstekend</option></select></div>
-                <div style={{...T.fg,gridColumn:"span 2"}}><label style={T.lbl}>Opmerking</label><input style={T.input} value={ex.note} placeholder="bijv. knieën meer naar buiten" onChange={e=>setEx(ex.id,"note",e.target.value)} /></div>
-              </div>
-            </div>
+            <ExerciseBlock key={ex.id} ex={ex} idx={idx} canRemove={form.exercises.length>1}
+              onRemove={()=>removeEx(ex.id)}
+              onChange={(k,v)=>setEx(ex.id,k,v)}
+              onSetChange={(sid,k,v)=>setForm(p=>({...p,exercises:p.exercises.map(e=>e.id===ex.id?{...e,setData:e.setData.map(s=>s.id===sid?{...s,[k]:v}:s)}:e)}))}
+              onAddSet={()=>setForm(p=>({...p,exercises:p.exercises.map(e=>e.id===ex.id?{...e,setData:[...(e.setData||[]),blankSet()]}:e)}))}
+              onRemoveSet={(sid)=>setForm(p=>({...p,exercises:p.exercises.map(e=>e.id===ex.id?{...e,setData:(e.setData||[]).filter(s=>s.id!==sid)}:e)}))}
+            />
           ))}
           <button style={{...T.btnSec,width:"100%",marginTop:4}} onClick={addEx}>+ Oefening toevoegen</button>
         </div>
@@ -696,10 +879,42 @@ function TrainingDetail({training,client,onBack,onEdit,onDelete}) {
         <div style={{display:"flex",gap:8}}><button style={T.btnSec} onClick={onEdit}>Bewerken</button><button style={T.btnDanger} onClick={onDelete}>Verwijderen</button></div>
       </div>
       <SectionTitle>Oefeningen</SectionTitle>
-      <div style={{overflowX:"auto",marginBottom:8}}>
-        <table style={T.tbl}><thead><tr>{["Oefening","Sets","Reps","Gewicht","RPE","Techniek","Opmerking"].map(h=><th key={h} style={T.th}>{h}</th>)}</tr></thead>
-        <tbody>{(training.exercises??[]).map(ex=>(<tr key={ex.id}><td style={T.tdBold}>{ex.name||"—"}</td><td style={T.td}>{ex.sets||"—"}</td><td style={T.td}>{ex.reps||"—"}</td><td style={T.td}>{ex.weight?`${ex.weight} kg`:"—"}</td><td style={T.td}>{ex.rpe?<span style={{color:rpeColor(ex.rpe),fontWeight:700}}>{ex.rpe}</span>:"—"}</td><td style={T.td}><span style={{color:C.yellow,letterSpacing:1}}>{ex.technique?techStars(ex.technique):"—"}</span></td><td style={{...T.td,color:C.textLow}}>{ex.note||"—"}</td></tr>))}</tbody>
-        </table>
+      <div style={{marginBottom:8}}>
+        {(training.exercises??[]).map(ex=>(
+          <div key={ex.id} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 16px",marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:ex.setData?.length>0?12:0,flexWrap:"wrap",gap:8}}>
+              <div>
+                <span style={{fontSize:14,fontWeight:700,color:C.text}}>{ex.name||"—"}</span>
+                {ex.technique&&<span style={{color:C.yellow,marginLeft:10,letterSpacing:1}}>{techStars(ex.technique)}</span>}
+              </div>
+              <div style={{display:"flex",gap:12,fontSize:12,color:C.textLow,flexWrap:"wrap"}}>
+                {ex.note&&<span style={{color:C.textMid,fontStyle:"italic"}}>{ex.note}</span>}
+              </div>
+            </div>
+            {ex.setData?.length>0?(
+              <div style={{overflowX:"auto"}}>
+                <table style={{...T.tbl,marginTop:4}}>
+                  <thead><tr>{["Set","Reps","Gewicht","RPE"].map(h=><th key={h} style={{...T.th,padding:"5px 10px"}}>{h}</th>)}</tr></thead>
+                  <tbody>{ex.setData.map((s,i)=>(
+                    <tr key={s.id}>
+                      <td style={{...T.td,padding:"8px 10px",color:C.textLow,fontWeight:600}}>#{i+1}</td>
+                      <td style={{...T.td,padding:"8px 10px"}}>{s.reps||"—"}</td>
+                      <td style={{...T.td,padding:"8px 10px"}}>{s.weight?`${s.weight} kg`:"—"}</td>
+                      <td style={{...T.td,padding:"8px 10px"}}>{s.rpe?<span style={{color:rpeColor(s.rpe),fontWeight:700}}>{s.rpe}</span>:"—"}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ):(
+              <div style={{display:"flex",gap:20,fontSize:13,color:C.textMid,flexWrap:"wrap",marginTop:4}}>
+                {ex.sets&&<span><span style={{color:C.textLow,fontSize:11}}>SETS </span>{ex.sets}</span>}
+                {ex.reps&&<span><span style={{color:C.textLow,fontSize:11}}>REPS </span>{ex.reps}</span>}
+                {ex.weight&&<span><span style={{color:C.textLow,fontSize:11}}>KG </span>{ex.weight}</span>}
+                {ex.rpe&&<span><span style={{color:C.textLow,fontSize:11}}>RPE </span><span style={{color:rpeColor(ex.rpe),fontWeight:700}}>{ex.rpe}</span></span>}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
       {(training.notes||training.nextFocus)&&(<><SectionTitle>Notities</SectionTitle><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"14px 24px"}}>{training.notes&&<div><div style={{fontSize:11,fontWeight:600,color:C.textLow,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:6}}>Opmerking</div><div style={T.notesBox}>{training.notes}</div></div>}{training.nextFocus&&<div><div style={{fontSize:11,fontWeight:600,color:C.textLow,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:6}}>Focus volgende training</div><div style={{...T.notesBox,borderColor:C.accentDim,color:C.accent}}>📌 {training.nextFocus}</div></div>}</div></>)}
     </>
@@ -713,13 +928,47 @@ function Progressie({client,onBack}) {
   const trainings=[...(client.trainings??[])].reverse();
   const allNames=[...new Set(trainings.flatMap(t=>(t.exercises??[]).map(e=>e.name).filter(Boolean)))];
   const [selected,setSelected]=useState(allNames[0]??"");
-  const data=trainings.flatMap(t=>{const matches=(t.exercises??[]).filter(e=>e.name.toLowerCase()===selected.toLowerCase());if(!matches.length)return[];const best=matches.reduce((a,b)=>(Number(b.weight)||0)>(Number(a.weight)||0)?b:a);const weight=Number(best.weight)||null,reps=Number(best.reps)||null,sets=Number(best.sets)||1;const volume=weight&&reps?Math.round(weight*reps*sets):null;if(!weight&&!reps)return[];return[{date:fmtShort(t.date),weight,reps,volume}];});
+  const [clientView,setClientView]=useState(false);
+  const data=trainings.flatMap(t=>{
+    const matches=(t.exercises??[]).filter(e=>e.name.toLowerCase()===selected.toLowerCase());
+    if(!matches.length)return[];
+    const best=matches[0];
+    // Gebruik setData als beschikbaar, anders het algemene gewicht
+    let weight=null,reps=null,sets=0;
+    if(best.setData?.length>0){
+      const maxSet=best.setData.reduce((a,b)=>(Number(b.weight)||0)>(Number(a.weight)||0)?b:a);
+      weight=Number(maxSet.weight)||null;
+      reps=Number(maxSet.reps)||null;
+      sets=best.setData.length;
+    } else {
+      weight=Number(best.weight)||null;
+      reps=Number(best.reps)||null;
+      sets=Number(best.sets)||1;
+    }
+    const volume=weight&&reps?Math.round(weight*reps*sets):null;
+    if(!weight&&!reps)return[];
+    return[{date:fmtShort(t.date),weight,reps,volume}];
+  });
   const stagnant=data.length>=3&&data.slice(-3).every(d=>d.weight===data[data.length-1].weight);
   const exerciseRows=allNames.map(name=>{const appearances=trainings.flatMap(t=>(t.exercises??[]).filter(e=>e.name.toLowerCase()===name.toLowerCase()).map(e=>({date:t.date,...e})));const last=appearances[appearances.length-1],first=appearances[0];const wChange=last?.weight&&first?.weight?(Number(last.weight)-Number(first.weight)).toFixed(1):null;return{name,count:appearances.length,last,first,wChange};});
   return (
     <>
-      <button style={T.backBtn} onClick={onBack}>← Terug naar {client.name}</button>
-      <div style={{marginBottom:28}}><h1 style={T.h1}>Progressie</h1><p style={{...T.sub,marginTop:4}}>{client.name}</p></div>
+      {!clientView&&<button style={T.backBtn} onClick={onBack}>← Terug naar {client.name}</button>}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:28,flexWrap:"wrap",gap:12}}>
+        <div><h1 style={T.h1}>Progressie</h1><p style={{...T.sub,marginTop:4}}>{client.name}</p></div>
+        <button style={{...T.btnSec,borderColor:C.accentDim,color:clientView?C.accent:C.textMid,background:clientView?C.accentDim:"transparent"}}
+          onClick={()=>setClientView(p=>!p)}>
+          {clientView?"✕ Sluit klantweergave":"👤 Toon aan klant"}
+        </button>
+      </div>
+      {clientView&&(
+        <div style={{background:"#0d1a2e",border:`1px solid ${C.accentDim}`,borderRadius:12,padding:"16px 20px",marginBottom:24}}>
+          <div style={{fontSize:13,color:C.textMid,lineHeight:1.6}}>
+            <strong style={{color:C.accent}}>Progressieoverzicht</strong> voor <strong style={{color:C.text}}>{client.name}</strong>
+            <span style={{display:"block",fontSize:12,marginTop:4,color:C.textLow}}>Bekijk hieronder de progressie per oefening over de tijd.</span>
+          </div>
+        </div>
+      )}
       {allNames.length===0?<div style={{padding:"40px 0",color:C.textLow,fontSize:13}}>Nog geen oefeningen gelogd.</div>:(<>
         <SectionTitle>Grafiek</SectionTitle>
         <div style={{marginBottom:20}}><select style={{...T.select,maxWidth:260}} value={selected} onChange={e=>setSelected(e.target.value)}>{allNames.map(n=><option key={n} value={n}>{n}</option>)}</select></div>
@@ -901,16 +1150,13 @@ function GroupTraining({clients,equipment,onSave,onCancel,toast}) {
               </div>
             )}
             {form.exercises.map((ex,idx)=>(
-              <div key={ex.id} style={{background:C.bg,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 16px",marginBottom:8}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}><span style={{fontSize:12,fontWeight:700,color:ex.name?C.textMid:C.textLow}}>{ex.name||`Oefening ${idx+1}`}</span>{form.exercises.length>1&&<button style={{...T.btnGhost,color:C.red,fontSize:12}} onClick={()=>removeEx(activeTab,ex.id)}>✕</button>}</div>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))",gap:"8px 12px"}}>
-                  <div style={{...T.fg,gridColumn:"1 / -1"}}><label style={T.lbl}>Oefening</label><input style={T.input} value={ex.name} placeholder="Typ of kies hierboven" onChange={e=>setEx(activeTab,ex.id,"name",e.target.value)} /></div>
-                  {[["sets","Sets","4"],["reps","Reps","8"],["weight","Gewicht (kg)","80"]].map(([k,l,ph])=>(<div key={k} style={T.fg}><label style={T.lbl}>{l}</label><input style={T.input} type="number" min="0" step={k==="weight"?"0.5":"1"} value={ex[k]} placeholder={ph} onChange={e=>setEx(activeTab,ex.id,k,e.target.value)} /></div>))}
-                  <div style={T.fg}><label style={T.lbl}>RPE</label><select style={T.select} value={ex.rpe} onChange={e=>setEx(activeTab,ex.id,"rpe",e.target.value)}><option value="">—</option>{[1,2,3,4,5,6,7,8,9,10].map(n=><option key={n} value={n}>{n}</option>)}</select></div>
-                  <div style={T.fg}><label style={T.lbl}>Techniek</label><select style={T.select} value={ex.technique} onChange={e=>setEx(activeTab,ex.id,"technique",e.target.value)}><option value="">—</option>{[["1","1★"],["2","2★★"],["3","3★★★"],["4","4★★★★"],["5","5★★★★★"]].map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
-                  <div style={{...T.fg,gridColumn:"span 2"}}><label style={T.lbl}>Opmerking</label><input style={T.input} value={ex.note} placeholder="Notitie" onChange={e=>setEx(activeTab,ex.id,"note",e.target.value)} /></div>
-                </div>
-              </div>
+              <ExerciseBlock key={ex.id} ex={ex} idx={idx} canRemove={form.exercises.length>1}
+                onRemove={()=>removeEx(activeTab,ex.id)}
+                onChange={(k,v)=>setEx(activeTab,ex.id,k,v)}
+                onSetChange={(sid,k,v)=>setForms(p=>({...p,[activeTab]:{...p[activeTab],exercises:p[activeTab].exercises.map(e=>e.id===ex.id?{...e,setData:e.setData.map(s=>s.id===sid?{...s,[k]:v}:s)}:e)}}))}
+                onAddSet={()=>setForms(p=>({...p,[activeTab]:{...p[activeTab],exercises:p[activeTab].exercises.map(e=>e.id===ex.id?{...e,setData:[...(e.setData||[]),blankSet()]}:e)}}))}
+                onRemoveSet={(sid)=>setForms(p=>({...p,[activeTab]:{...p[activeTab],exercises:p[activeTab].exercises.map(e=>e.id===ex.id?{...e,setData:(e.setData||[]).filter(s=>s.id!==sid)}:e)}}))}
+              />
             ))}
             <button style={{...T.btnSec,width:"100%",marginTop:4}} onClick={()=>addEx(activeTab)}>+ Oefening toevoegen</button>
           </div>
