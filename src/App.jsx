@@ -26,6 +26,21 @@ async function sbFetch(path, opts = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CLAUDE API (via Netlify Function)
+// ─────────────────────────────────────────────────────────────────────────────
+async function callClaude(messages, maxTokens = 1500) {
+  const resp = await fetch("/.netlify/functions/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: maxTokens, messages }),
+  });
+  if (!resp.ok) throw new Error("Claude API fout");
+  const data = await resp.json();
+  if (data.error) throw new Error(data.error);
+  return (data.content ?? []).map(b => b.text ?? "").join("");
+}
+
 // DB helpers
 const db = {
   // Clients
@@ -73,6 +88,15 @@ const db = {
   }),
   deleteTraining: (id) => sbFetch(`trainings?id=eq.${id}`, { method: "DELETE", prefer: "" }),
 
+  // InBody metingen
+  getInbody: (clientId) => sbFetch(`inbody_measurements?client_id=eq.${clientId}&order=date.desc,created_at.desc`),
+  insertInbody: (m, clientId) => sbFetch("inbody_measurements", {
+    method: "POST",
+    headers: { "Prefer": "return=representation" },
+    body: JSON.stringify({ id: m.id, client_id: clientId, date: m.date, data: m.data ?? {} }),
+  }),
+  deleteInbody: (id) => sbFetch(`inbody_measurements?id=eq.${id}`, { method: "DELETE", prefer: "" }),
+
   // Equipment
   getEquipment: () => sbFetch("equipment?select=*&order=name.asc"),
   upsertEquipment: (eq) => sbFetch("equipment", {
@@ -88,14 +112,17 @@ const db = {
 };
 
 // Convert DB row → app object
-function rowToClient(row, trainings = []) {
+function rowToClient(row, trainings = [], inbody = []) {
   return {
     id: row.id, name: row.name, goal: row.goal, frequency: row.frequency ?? "",
     injuries: row.injuries ?? "", preferredExercises: row.preferred_exercises ?? "",
     dislikedExercises: row.disliked_exercises ?? "", currentFocus: row.current_focus ?? "",
     notes: row.notes ?? "", createdAt: row.created_at, aiAnalyses: row.ai_analyses ?? [],
-    trainings,
+    trainings, inbody,
   };
+}
+function rowToInbody(row) {
+  return { id: row.id, date: row.date, data: row.data ?? {} };
 }
 function rowToTraining(row) {
   return {
@@ -299,8 +326,8 @@ export default function App() {
         // Load trainings for each client
         const clientsWithTrainings = await Promise.all(
           (clientRows ?? []).map(async (row) => {
-            const tRows = await db.getTrainings(row.id);
-            return rowToClient(row, (tRows ?? []).map(rowToTraining));
+            const [tRows, iRows] = await Promise.all([db.getTrainings(row.id), db.getInbody(row.id)]);
+            return rowToClient(row, (tRows ?? []).map(rowToTraining), (iRows ?? []).map(rowToInbody));
           })
         );
         setClients(clientsWithTrainings);
@@ -395,6 +422,24 @@ export default function App() {
     } catch(e) {}
   };
 
+  // InBody metingen
+  const saveInbody = async (m) => {
+    try {
+      await db.insertInbody(m, clientId);
+      setClients(p=>p.map(c=>c.id!==clientId?c:{...c,inbody:[m,...(c.inbody??[])]}));
+      toast("InBody-meting opgeslagen");
+      go("inbody", clientId);
+    } catch(e) { toast("Opslaan mislukt","error"); }
+  };
+  const deleteInbody = async (mId) => {
+    if(!window.confirm("Meting verwijderen?")) return;
+    try {
+      await db.deleteInbody(mId);
+      setClients(p=>p.map(c=>c.id!==clientId?c:{...c,inbody:(c.inbody??[]).filter(m=>m.id!==mId)}));
+      toast("Meting verwijderd");
+    } catch(e) { toast("Verwijderen mislukt","error"); }
+  };
+
   // Equipment
   const updateEquipment = async (newEq) => {
     try {
@@ -431,11 +476,13 @@ export default function App() {
       <main style={T.main}>
         {view==="dashboard"       && <Dashboard clients={filtered} search={search} setSearch={setSearch} hovered={hovered} setHovered={setHovered} onNew={()=>go("client-form")} onOpen={c=>go("profile",c.id)} onGroupTraining={(ids)=>{setGroupClientIds(ids);go("group-training");}} />}
         {view==="client-form"     && <ClientForm initial={client} onSave={saveClient} onCancel={()=>go(clientId?"profile":"dashboard")} />}
-        {view==="profile"         && client && <ClientProfile client={client} hovered={hovered} setHovered={setHovered} onEdit={()=>go("client-form",clientId)} onDelete={()=>deleteClient(clientId)} onNewTraining={()=>{setTrainingId(null);go("training-form",clientId,null);}} onOpenTraining={t=>go("training-detail",clientId,t.id)} onProgressie={()=>go("progressie",clientId)} onAI={()=>go("ai",clientId)} />}
+        {view==="profile"         && client && <ClientProfile client={client} hovered={hovered} setHovered={setHovered} onEdit={()=>go("client-form",clientId)} onDelete={()=>deleteClient(clientId)} onNewTraining={()=>{setTrainingId(null);go("training-form",clientId,null);}} onOpenTraining={t=>go("training-detail",clientId,t.id)} onProgressie={()=>go("progressie",clientId)} onAI={()=>go("ai",clientId)} onInbody={()=>go("inbody",clientId)} />}
         {view==="training-form"   && client && <TrainingForm client={client} training={training} equipment={equipment} onSave={saveTraining} onCancel={()=>go("profile",clientId)} toast={toast} />}
         {view==="training-detail" && client&&training && <TrainingDetail training={training} client={client} onBack={()=>go("profile",clientId)} onEdit={()=>go("training-form",clientId,trainingId)} onDelete={()=>deleteTraining(trainingId)} />}
         {view==="progressie"      && client && <Progressie client={client} onBack={()=>go("profile",clientId)} />}
         {view==="ai"              && client && <AIAnalyse client={client} equipment={equipment} onBack={()=>go("profile",clientId)} onSaveAnalysis={saveAnalysis} toast={toast} />}
+        {view==="inbody"          && client && <InbodyOverview client={client} onBack={()=>go("profile",clientId)} onNew={()=>go("inbody-add",clientId)} onDelete={deleteInbody} />}
+        {view==="inbody-add"      && client && <InbodyAdd client={client} onSave={saveInbody} onCancel={()=>go("inbody",clientId)} toast={toast} />}
         {view==="settings"        && <Settings equipment={equipment} setEquipment={updateEquipment} toast={toast} onBack={()=>go("dashboard")} />}
         {view==="group-training"  && <GroupTraining clients={clients.filter(c=>groupClientIds.includes(c.id))} equipment={equipment} onSave={saveGroupTrainings} onCancel={()=>go("dashboard")} toast={toast} />}
       </main>
@@ -534,7 +581,7 @@ function ClientForm({initial,onSave,onCancel}) {
 // ─────────────────────────────────────────────────────────────────────────────
 // CLIENT PROFILE
 // ─────────────────────────────────────────────────────────────────────────────
-function ClientProfile({client,onEdit,onDelete,onNewTraining,onOpenTraining,onProgressie,onAI,hovered,setHovered}) {
+function ClientProfile({client,onEdit,onDelete,onNewTraining,onOpenTraining,onProgressie,onAI,onInbody,hovered,setHovered}) {
   const trainings=client.trainings??[];
   const [periodFilter,setPeriodFilter]=useState("all");
   const filterT=(ts)=>{if(periodFilter==="all")return ts;const days=periodFilter==="30"?30:periodFilter==="90"?90:180;const cutoff=new Date(Date.now()-days*86400000);return ts.filter(t=>new Date(t.date+"T12:00:00")>=cutoff);};
@@ -553,6 +600,7 @@ function ClientProfile({client,onEdit,onDelete,onNewTraining,onOpenTraining,onPr
         <button style={T.btnPrimary} onClick={onNewTraining}>+ Training toevoegen</button>
         <button style={T.btnSec} onClick={onProgressie}>📈 Progressie</button>
         <button style={{...T.btnSec,borderColor:C.accentDim,color:C.accent}} onClick={onAI}>✦ AI-analyse</button>
+        <button style={T.btnSec} onClick={onInbody}>⚖️ InBody</button>
       </div>
       <div style={T.statsRow}>
         <StatCard value={trainings.length} label="Trainingen" />
@@ -811,7 +859,7 @@ function TrainingForm({client,training,equipment,onSave,onCancel,toast}) {
     const availableNames=allExercises.map(e=>e.name).join(", ");
     const recentUnique=[...new Set((client.trainings??[]).slice(0,5).flatMap(t=>(t.exercises??[]).map(e=>e.name)).filter(Boolean))].join(", ");
     const prompt=`Je bent een PT-coach assistent. Stel 5 oefeningen voor.\nKlant: ${client.name}\nDoel: ${GOAL_OPTIONS.find(g=>g.value===client.goal)?.label??client.goal}\nBlessures: ${client.injuries||"geen"}\nFocus: ${client.currentFocus||"geen"}\nNiet-fijn: ${client.dislikedExercises||"geen"}\nRecent gedaan: ${recentUnique||"onbekend"}\nBeschikbaar: ${availableNames}\nKies ALLEEN uit beschikbare oefeningen. JSON array (geen markdown):\n[{"name":"naam exact","reason":"1 zin waarom"},...]`;
-    try{const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:600,messages:[{role:"user",content:prompt}]})});const data=await resp.json();const text=(data.content??[]).map(b=>b.text??"").join("");setAiSugs(JSON.parse(text.replace(/```json|```/g,"").trim()));}
+    try{const text=await callClaude([{role:"user",content:prompt}],600);setAiSugs(JSON.parse(text.replace(/```json|```/g,"").trim()));}
     catch{toast("AI-suggesties mislukt","error");setAiSugs([]);}
     setAiLoading(false);
   };
@@ -1015,7 +1063,7 @@ function AIAnalyse({client,equipment,onBack,onSaveAnalysis,toast}) {
   };
   const runAnalysis=async()=>{
     setStatus("loading");setResult(null);
-    try{const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,messages:[{role:"user",content:buildPrompt()}]})});const data=await resp.json();const text=(data.content??[]).map(b=>b.text??"").join("");const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());const withDate={...parsed,date:new Date().toISOString()};setResult(withDate);setStatus("done");onSaveAnalysis(client.id,withDate);toast("Analyse opgeslagen");}
+    try{const text=await callClaude([{role:"user",content:buildPrompt()}],1000);const parsed=JSON.parse(text.replace(/```json|```/g,"").trim());const withDate={...parsed,date:new Date().toISOString()};setResult(withDate);setStatus("done");onSaveAnalysis(client.id,withDate);toast("Analyse opgeslagen");}
     catch{setStatus("error");toast("Analyse mislukt","error");}
   };
   const SECTIONS=[{key:"progressie",icon:"📈",label:"Progressie"},{key:"stagnatie",icon:"⚠️",label:"Stagnatie"},{key:"spiergroepen",icon:"💪",label:"Spiergroepbalans"},{key:"oefeningen",icon:"🔄",label:"Oefeningsuggesties"},{key:"volgendeFocus",icon:"🎯",label:"Focus volgende training"}];
@@ -1111,7 +1159,7 @@ function GroupTraining({clients,equipment,onSave,onCancel,toast}) {
   const allExercises=equipment.flatMap(eq=>eq.exercises.map(ex=>({...ex,equipment:eq.name})));
   const filteredExercises=allExercises.filter(ex=>(muscleFilter==="Alle"||ex.muscles.includes(muscleFilter))&&(eqFilter==="Alle"||ex.equipment===eqFilter));
   const pickExercise=(cId,exName)=>{const used=new Set(forms[cId].exercises.map(e=>e.name.toLowerCase()).filter(Boolean));if(used.has(exName.toLowerCase()))return;const emptyIdx=forms[cId].exercises.findIndex(e=>!e.name.trim());if(emptyIdx>=0){setForms(p=>({...p,[cId]:{...p[cId],exercises:p[cId].exercises.map((e,i)=>i===emptyIdx?{...e,name:exName}:e)}}));}else{addEx(cId);setTimeout(()=>setForms(p=>{const exs=p[cId].exercises;return{...p,[cId]:{...p[cId],exercises:exs.map((e,i)=>i===exs.length-1?{...e,name:exName}:e)}};}),0);}};
-  const fetchAISuggestions=async(cId)=>{setAiLoading(p=>({...p,[cId]:true}));const client=clients.find(c=>c.id===cId);const availableNames=allExercises.map(e=>e.name).join(", ");const recentUnique=[...new Set((client.trainings??[]).slice(0,5).flatMap(t=>(t.exercises??[]).map(e=>e.name)).filter(Boolean))].join(", ");const prompt=`PT coach assistent. Stel 5 oefeningen voor.\nKlant: ${client.name}, Doel: ${GOAL_OPTIONS.find(g=>g.value===client.goal)?.label??client.goal}, Blessures: ${client.injuries||"geen"}, Focus: ${client.currentFocus||"geen"}, Niet-fijn: ${client.dislikedExercises||"geen"}, Recent: ${recentUnique||"onbekend"}\nBeschikbaar: ${availableNames}\nJSON array (geen markdown): [{"name":"naam exact","reason":"1 zin"},...]`;try{const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:600,messages:[{role:"user",content:prompt}]})});const data=await resp.json();const text=(data.content??[]).map(b=>b.text??"").join("");setAiSugs(p=>({...p,[cId]:JSON.parse(text.replace(/```json|```/g,"").trim())}));}catch{toast("AI-suggesties mislukt","error");}setAiLoading(p=>({...p,[cId]:false}));};
+  const fetchAISuggestions=async(cId)=>{setAiLoading(p=>({...p,[cId]:true}));const client=clients.find(c=>c.id===cId);const availableNames=allExercises.map(e=>e.name).join(", ");const recentUnique=[...new Set((client.trainings??[]).slice(0,5).flatMap(t=>(t.exercises??[]).map(e=>e.name)).filter(Boolean))].join(", ");const prompt=`PT coach assistent. Stel 5 oefeningen voor.\nKlant: ${client.name}, Doel: ${GOAL_OPTIONS.find(g=>g.value===client.goal)?.label??client.goal}, Blessures: ${client.injuries||"geen"}, Focus: ${client.currentFocus||"geen"}, Niet-fijn: ${client.dislikedExercises||"geen"}, Recent: ${recentUnique||"onbekend"}\nBeschikbaar: ${availableNames}\nJSON array (geen markdown): [{"name":"naam exact","reason":"1 zin"},...]`;try{const text=await callClaude([{role:"user",content:prompt}],600);setAiSugs(p=>({...p,[cId]:JSON.parse(text.replace(/```json|```/g,"").trim())}));}catch{toast("AI-suggesties mislukt","error");}setAiLoading(p=>({...p,[cId]:false}));};
   const handleSave=()=>{const trainingsMap=Object.fromEntries(clients.map(c=>[c.id,{...forms[c.id],id:uid()}]));onSave(trainingsMap);};
   const activeClient=clients.find(c=>c.id===activeTab);const form=activeTab?forms[activeTab]:null;
   return (
@@ -1166,6 +1214,330 @@ function GroupTraining({clients,equipment,onSave,onCancel,toast}) {
         <button style={T.btnSec} onClick={onCancel}>Annuleren</button>
         <button style={T.btnPrimary} onClick={handleSave}>💾 Alle trainingen opslaan ({clients.length})</button>
       </div>
+    </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INBODY — velden definitie met uitleg en gezonde bereiken
+// ─────────────────────────────────────────────────────────────────────────────
+const INBODY_FIELDS = [
+  { key:"gewicht", label:"Gewicht", unit:"kg", group:"Basis",
+    info:"Je totale lichaamsgewicht. Op zichzelf zegt dit weinig — het gaat om de verhouding tussen spier en vet." },
+  { key:"skeletspiermassa", label:"Skeletspiermassa (SSM)", unit:"kg", group:"Basis", higherBetter:true,
+    info:"De spieren die je bewust aanstuurt. Meer spiermassa betekent een sterker, gezonder lichaam en een hogere verbranding in rust. Dit wil je zien stijgen." },
+  { key:"vetmassa", label:"Vetmassa", unit:"kg", group:"Basis", lowerBetter:true,
+    info:"Totale hoeveelheid lichaamsvet in kilo's. Een deel vet is essentieel, maar te veel verhoogt gezondheidsrisico's. Idealiter daalt dit terwijl spiermassa gelijk blijft of stijgt." },
+  { key:"vetpercentage", label:"Vetpercentage", unit:"%", group:"Basis", lowerBetter:true,
+    info:"Het percentage van je gewicht dat uit vet bestaat. Gezond: mannen 10-20%, vrouwen 18-28%. Dit is een betere maatstaf dan gewicht of BMI.",
+    range:{ man:[10,20], vrouw:[18,28] } },
+  { key:"bmi", label:"BMI", unit:"kg/m²", group:"Basis",
+    info:"Gewicht gedeeld door lengte in het kwadraat. Gezond bereik volgens de WHO is 18.5-25. Let op: BMI houdt geen rekening met spiermassa, dus gespierde mensen scoren soms 'te hoog' terwijl ze gezond zijn.",
+    range:{ algemeen:[18.5,25] } },
+  { key:"visceraalvet", label:"Visceraal vetniveau", unit:"", group:"Gezondheid", lowerBetter:true,
+    info:"Vet rondom je organen in de buik. Dit is het gevaarlijkste vet — het verhoogt het risico op hart- en vaatziekten en diabetes. Een niveau onder de 10 is gezond, daaronder hoe lager hoe beter.",
+    range:{ algemeen:[1,9] } },
+  { key:"basaalmetabolisme", label:"Basaalmetabolisme (BMR)", unit:"kcal", group:"Gezondheid", higherBetter:true,
+    info:"Het aantal calorieën dat je lichaam in rust per dag verbruikt om te functioneren. Meer spiermassa verhoogt dit getal. Handig om de calorie-inname op af te stemmen." },
+  { key:"inbodyscore", label:"InBody Score", unit:"/100", group:"Gezondheid", higherBetter:true,
+    info:"Een totaalscore van je lichaamssamenstelling. 70-80 is normaal en gezond. Boven de 80 betekent veel spier en weinig vet — heel goed bezig. Een gespierd persoon kan boven de 100 uitkomen.",
+    range:{ algemeen:[70,100] } },
+  { key:"streefgewicht", label:"Streefgewicht", unit:"kg", group:"Gezondheid",
+    info:"Het gewicht dat de InBody aanraadt op basis van een gezonde lichaamssamenstelling voor lengte en geslacht." },
+  { key:"lichaamswater", label:"Totaal lichaamswater", unit:"L", group:"Gevorderd",
+    info:"De totale hoeveelheid water in je lichaam. Schommelt met hydratatie en inspanning. Een stabiel niveau over metingen is normaal." },
+  { key:"eiwitten", label:"Eiwitten", unit:"kg", group:"Gevorderd", higherBetter:true,
+    info:"De eiwitmassa in je lichaam, een bouwsteen van spierweefsel. Stijgt mee met spiergroei." },
+  { key:"mineralen", label:"Mineralen", unit:"kg", group:"Gevorderd",
+    info:"Mineralen in botten en weefsel. Geeft een indicatie van botgezondheid." },
+  { key:"skeletspierindex", label:"Skeletspier Index (SMI)", unit:"kg/m²", group:"Gevorderd", higherBetter:true,
+    info:"Spiermassa gecorrigeerd voor lengte. Wordt gebruikt om te beoordelen of iemand voldoende spier heeft (tegenovergestelde van sarcopenie/spierverlies)." },
+  { key:"middelheupratio", label:"Middel-heup ratio", unit:"", group:"Gevorderd", lowerBetter:true,
+    info:"De verhouding tussen je taille en heupen. Een lagere waarde betekent minder buikvet en een lager gezondheidsrisico. Gezond: mannen onder 0.90, vrouwen onder 0.85." },
+];
+const INBODY_GROUPS = ["Basis","Gezondheid","Gevorderd"];
+
+// Bepaal status van een waarde (goed / let op / hoog)
+function inbodyStatus(field, value, gender) {
+  if (!field.range || value === "" || value == null) return null;
+  const num = Number(value);
+  if (isNaN(num)) return null;
+  let range = field.range.algemeen;
+  if (!range && gender) range = gender.toLowerCase().startsWith("v") ? field.range.vrouw : field.range.man;
+  if (!range) return null;
+  const [min, max] = range;
+  if (num < min) return field.lowerBetter ? { txt:"Uitstekend", color:C.green } : { txt:"Aan de lage kant", color:C.yellow };
+  if (num > max) return field.lowerBetter ? { txt:"Te hoog — aandachtspunt", color:C.red } : { txt:"Boven gemiddeld", color:num>max*1.2?C.red:C.yellow };
+  return { txt:"Gezond bereik", color:C.green };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INBODY ADD — foto uploaden/maken en door AI laten uitlezen
+// ─────────────────────────────────────────────────────────────────────────────
+function InbodyAdd({ client, onSave, onCancel, toast }) {
+  const [status, setStatus] = useState("idle"); // idle | reading | review
+  const [data, setData] = useState({});
+  const [date, setDate] = useState(new Date().toISOString().slice(0,10));
+  const [gender, setGender] = useState("");
+  const fileRef = useRef();
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setStatus("reading");
+    try {
+      // Lees als base64
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(",")[1]);
+        r.onerror = rej;
+        r.readAsDataURL(file);
+      });
+      const mediaType = file.type || "image/jpeg";
+
+      const fieldList = INBODY_FIELDS.map(f => `"${f.key}"`).join(", ");
+      const prompt = `Dit is een foto van een InBody lichaamsanalyse uitdraai. Lees alle waarden nauwkeurig uit. Geef ALLEEN een JSON object terug (geen markdown), met deze keys (laat een key weg als de waarde niet leesbaar is): ${fieldList}, en "geslacht" (man of vrouw).
+
+Gebruik punten voor decimalen. Geef alleen het getal, geen eenheden. Bijvoorbeeld: {"gewicht": 68.0, "vetpercentage": 30.0, "geslacht": "vrouw"}`;
+
+      const messages = [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+          { type: "text", text: prompt },
+        ],
+      }];
+
+      const text = await callClaude(messages, 1500);
+      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const g = parsed.geslacht || "";
+      delete parsed.geslacht;
+      setData(parsed);
+      setGender(g);
+      setStatus("review");
+      toast("Waarden uitgelezen — controleer ze");
+    } catch (e) {
+      console.error(e);
+      toast("Uitlezen mislukt — vul handmatig in of probeer opnieuw", "error");
+      setStatus("review");
+    }
+  };
+
+  const setField = (k, v) => setData(p => ({ ...p, [k]: v }));
+
+  const handleSave = () => {
+    onSave({ id: uid(), date, data: { ...data, geslacht: gender } });
+  };
+
+  return (
+    <>
+      <button style={T.backBtn} onClick={onCancel}>← Terug</button>
+      <div style={{marginBottom:24}}>
+        <h1 style={T.h1}>InBody toevoegen</h1>
+        <p style={{...T.sub,marginTop:4}}>{client.name}</p>
+      </div>
+
+      {status === "idle" && (
+        <div style={T.form}>
+          <div style={{textAlign:"center",padding:"20px 0 32px"}}>
+            <div style={{fontSize:44,marginBottom:14}}>⚖️</div>
+            <div style={{fontSize:15,fontWeight:600,color:C.text,marginBottom:8}}>Maak of upload een foto van de InBody-uitdraai</div>
+            <div style={{fontSize:13,color:C.textMid,marginBottom:28,lineHeight:1.6,maxWidth:420,margin:"0 auto 28px"}}>
+              De AI leest automatisch alle waarden uit. Daarna kun je ze controleren en aanpassen voordat je opslaat.
+            </div>
+            <button style={{...T.btnPrimary,fontSize:14,padding:"12px 28px"}} onClick={()=>fileRef.current?.click()}>
+              📷 Foto kiezen of maken
+            </button>
+            <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}}
+              onChange={e=>handleFile(e.target.files?.[0])} />
+            <div style={{marginTop:20}}>
+              <button style={{...T.btnGhost,fontSize:13,color:C.textLow}} onClick={()=>{setStatus("review");setData({});}}>
+                Of vul handmatig in →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {status === "reading" && (
+        <div style={T.form}>
+          <div style={{textAlign:"center",padding:"50px 0"}}>
+            <div style={{width:36,height:36,border:`3px solid ${C.border}`,borderTop:`3px solid ${C.accent}`,borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 20px"}} />
+            <div style={{fontSize:14,color:C.text,fontWeight:600,marginBottom:6}}>De AI leest de uitdraai uit…</div>
+            <div style={{fontSize:13,color:C.textLow}}>Dit duurt een paar seconden.</div>
+            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+          </div>
+        </div>
+      )}
+
+      {status === "review" && (
+        <div style={T.form}>
+          <h2 style={{...T.h2,marginBottom:6}}>Controleer de waarden</h2>
+          <p style={{...T.sub,marginBottom:20}}>Pas aan waar nodig. Lege velden worden niet opgeslagen.</p>
+
+          <div style={{...T.formGrid,marginBottom:20}}>
+            <div style={T.fg}>
+              <label style={T.lbl}>Datum meting</label>
+              <input type="date" style={T.input} value={date} onChange={e=>setDate(e.target.value)} />
+            </div>
+            <div style={T.fg}>
+              <label style={T.lbl}>Geslacht (voor normen)</label>
+              <select style={T.select} value={gender} onChange={e=>setGender(e.target.value)}>
+                <option value="">— Kies —</option>
+                <option value="man">Man</option>
+                <option value="vrouw">Vrouw</option>
+              </select>
+            </div>
+          </div>
+
+          {INBODY_GROUPS.map(group => (
+            <div key={group} style={{marginBottom:8}}>
+              <div style={{...T.sectionTitle,marginTop:16}}>{group}</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:"12px 16px"}}>
+                {INBODY_FIELDS.filter(f=>f.group===group).map(f=>{
+                  const st = inbodyStatus(f, data[f.key], gender);
+                  return (
+                    <div key={f.key} style={T.fg}>
+                      <label style={T.lbl}>{f.label}{f.unit&&` (${f.unit})`}</label>
+                      <input style={T.input} type="number" step="0.1" value={data[f.key]??""} placeholder="—"
+                        onChange={e=>setField(f.key, e.target.value)} />
+                      {st && <span style={{fontSize:11,color:st.color,fontWeight:600,marginTop:2}}>{st.txt}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+
+          <div style={T.formFoot}>
+            <button style={T.btnSec} onClick={onCancel}>Annuleren</button>
+            <button style={T.btnPrimary} onClick={handleSave}>Meting opslaan</button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INBODY OVERVIEW — metingen, uitleg per waarde, grafieken over tijd
+// ─────────────────────────────────────────────────────────────────────────────
+function InbodyOverview({ client, onBack, onNew, onDelete }) {
+  const measurements = [...(client.inbody ?? [])]; // nieuwste eerst (al gesorteerd)
+  const [expandedInfo, setExpandedInfo] = useState(null);
+  const [selectedMetric, setSelectedMetric] = useState("vetpercentage");
+
+  const latest = measurements[0];
+  const gender = latest?.data?.geslacht || "";
+
+  // Data voor grafiek (oud → nieuw)
+  const chartData = [...measurements].reverse()
+    .filter(m => m.data[selectedMetric] != null && m.data[selectedMetric] !== "")
+    .map(m => ({ date: fmtShort(m.date), value: Number(m.data[selectedMetric]) }));
+
+  const metricField = INBODY_FIELDS.find(f => f.key === selectedMetric);
+
+  return (
+    <>
+      <button style={T.backBtn} onClick={onBack}>← Terug naar {client.name}</button>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24,flexWrap:"wrap",gap:12}}>
+        <div><h1 style={T.h1}>InBody-metingen</h1><p style={{...T.sub,marginTop:4}}>{client.name}</p></div>
+        <button style={T.btnPrimary} onClick={onNew}>+ Meting toevoegen</button>
+      </div>
+
+      {measurements.length === 0 ? (
+        <div style={{textAlign:"center",padding:"60px 24px",color:C.textLow}}>
+          <div style={{fontSize:44,marginBottom:14}}>⚖️</div>
+          <div style={{fontSize:15,fontWeight:600,color:C.textMid,marginBottom:8}}>Nog geen metingen</div>
+          <div style={{marginBottom:20,fontSize:13}}>Voeg de eerste InBody-meting toe via een foto.</div>
+          <button style={T.btnPrimary} onClick={onNew}>+ Meting toevoegen</button>
+        </div>
+      ) : (
+        <>
+          {/* Laatste meting met uitleg */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",...T.sectionTitle}}>
+            <span>Laatste meting · {fmtDate(latest.date)}</span>
+            <button style={{...T.btnGhost,color:C.red,fontSize:12}} onClick={()=>onDelete(latest.id)}>Verwijderen</button>
+          </div>
+
+          {INBODY_GROUPS.map(group => {
+            const fields = INBODY_FIELDS.filter(f => f.group===group && latest.data[f.key]!=null && latest.data[f.key]!=="");
+            if (!fields.length) return null;
+            return (
+              <div key={group} style={{marginBottom:20}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.accent,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10}}>{group}</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:10}}>
+                  {fields.map(f => {
+                    const val = latest.data[f.key];
+                    const st = inbodyStatus(f, val, gender);
+                    const isOpen = expandedInfo === f.key;
+                    return (
+                      <div key={f.key} style={{background:C.surface,border:`1px solid ${st?st.color+"44":C.border}`,borderRadius:10,padding:"14px 16px"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                          <div>
+                            <div style={{fontSize:11,color:C.textLow,marginBottom:3}}>{f.label}</div>
+                            <div style={{fontSize:20,fontWeight:800,color:C.text,letterSpacing:"-0.02em"}}>
+                              {val}<span style={{fontSize:12,color:C.textLow,fontWeight:500,marginLeft:3}}>{f.unit}</span>
+                            </div>
+                          </div>
+                          <button style={{...T.btnGhost,fontSize:14,color:C.textLow,lineHeight:1}} onClick={()=>setExpandedInfo(isOpen?null:f.key)} title="Uitleg">ⓘ</button>
+                        </div>
+                        {st && <div style={{fontSize:11,fontWeight:700,color:st.color,marginTop:6}}>● {st.txt}</div>}
+                        {isOpen && <div style={{fontSize:12,color:C.textMid,lineHeight:1.6,marginTop:10,paddingTop:10,borderTop:`1px solid ${C.border}`}}>{f.info}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Grafiek over tijd */}
+          {measurements.length >= 2 && (
+            <>
+              <SectionTitle>Verloop over tijd</SectionTitle>
+              <div style={{marginBottom:16}}>
+                <select style={{...T.select,maxWidth:280}} value={selectedMetric} onChange={e=>setSelectedMetric(e.target.value)}>
+                  {INBODY_FIELDS.filter(f=>measurements.some(m=>m.data[f.key]!=null&&m.data[f.key]!=="")).map(f=>(
+                    <option key={f.key} value={f.key}>{f.label}</option>
+                  ))}
+                </select>
+              </div>
+              {chartData.length >= 2 ? (
+                <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:"20px 16px 12px",marginBottom:28}}>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <LineChart data={chartData} margin={{top:4,right:16,left:0,bottom:4}}>
+                      <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
+                      <XAxis dataKey="date" tick={{fill:C.textLow,fontSize:11}} axisLine={false} tickLine={false} />
+                      <YAxis tick={{fill:C.textLow,fontSize:11}} axisLine={false} tickLine={false} width={42} domain={['auto','auto']} />
+                      <Tooltip contentStyle={{background:C.surfaceHi,border:`1px solid ${C.border}`,borderRadius:8,fontSize:12,color:C.text}}
+                        formatter={(v)=>[`${v} ${metricField?.unit||""}`, metricField?.label||""]} />
+                      <Line type="monotone" dataKey="value" stroke={C.accent} strokeWidth={2.5} dot={{fill:C.accent,r:4,strokeWidth:0}} activeDot={{r:6}} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div style={{padding:"20px 0",color:C.textLow,fontSize:13}}>Minimaal 2 metingen met deze waarde nodig.</div>
+              )}
+            </>
+          )}
+
+          {/* Alle metingen lijst */}
+          <SectionTitle>Alle metingen ({measurements.length})</SectionTitle>
+          {measurements.map((m,i) => (
+            <div key={m.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 16px",background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,marginBottom:8}}>
+              <div>
+                <span style={{fontSize:14,fontWeight:600,color:C.text}}>{fmtDate(m.date)}</span>
+                <span style={{fontSize:12,color:C.textLow,marginLeft:12}}>
+                  {m.data.gewicht && `${m.data.gewicht} kg`}
+                  {m.data.vetpercentage && ` · ${m.data.vetpercentage}% vet`}
+                  {m.data.inbodyscore && ` · score ${m.data.inbodyscore}`}
+                </span>
+              </div>
+              {i!==0 && <button style={{...T.btnGhost,color:C.red,fontSize:12}} onClick={()=>onDelete(m.id)}>✕</button>}
+            </div>
+          ))}
+        </>
+      )}
     </>
   );
 }
