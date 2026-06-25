@@ -1344,10 +1344,15 @@ Gebruik punten voor decimalen. Geef alleen het getal, geen eenheden. Bijvoorbeel
             <div style={{fontSize:13,color:C.textMid,marginBottom:28,lineHeight:1.6,maxWidth:420,margin:"0 auto 28px"}}>
               De AI leest automatisch alle waarden uit. Daarna kun je ze controleren en aanpassen voordat je opslaat.
             </div>
-            <button style={{...T.btnPrimary,fontSize:14,padding:"12px 28px"}} onClick={()=>fileRef.current?.click()}>
-              📷 Foto kiezen of maken
-            </button>
-            <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}}
+            <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:8}}>
+              <button style={{...T.btnPrimary,fontSize:14,padding:"12px 24px"}} onClick={()=>{fileRef.current.removeAttribute("capture");fileRef.current.click();}}>
+                🖼 Kies uit galerij
+              </button>
+              <button style={{...T.btnSec,fontSize:14,padding:"12px 24px"}} onClick={()=>{fileRef.current.setAttribute("capture","environment");fileRef.current.click();}}>
+                📷 Camera
+              </button>
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}}
               onChange={e=>handleFile(e.target.files?.[0])} />
             <div style={{marginTop:20}}>
               <button style={{...T.btnGhost,fontSize:13,color:C.textLow}} onClick={()=>{setStatus("review");setData({});}}>
