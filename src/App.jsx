@@ -44,7 +44,7 @@ async function callClaude(messages, maxTokens = 1500) {
 // DB helpers
 const db = {
   // Clients
-  getClients: () => sbFetch("clients?select=*&order=created_at.desc"),
+  getClients: (trainerId) => sbFetch(`clients?select=*&trainer_id=eq.${trainerId}&order=created_at.desc`),
   insertClient: (c) => sbFetch("clients", {
     method: "POST",
     headers: { "Prefer": "return=representation" },
@@ -53,6 +53,7 @@ const db = {
       injuries: c.injuries, preferred_exercises: c.preferredExercises,
       disliked_exercises: c.dislikedExercises, current_focus: c.currentFocus,
       notes: c.notes, created_at: c.createdAt, ai_analyses: c.aiAnalyses ?? [],
+      trainer_id: c.trainerId ?? "teun",
     }),
   }),
   updateClient: (c) => sbFetch(`clients?id=eq.${c.id}`, {
@@ -118,6 +119,7 @@ function rowToClient(row, trainings = [], inbody = []) {
     injuries: row.injuries ?? "", preferredExercises: row.preferred_exercises ?? "",
     dislikedExercises: row.disliked_exercises ?? "", currentFocus: row.current_focus ?? "",
     notes: row.notes ?? "", createdAt: row.created_at, aiAnalyses: row.ai_analyses ?? [],
+    trainerId: row.trainer_id ?? "teun",
     trainings, inbody,
   };
 }
@@ -136,45 +138,139 @@ function rowToTraining(row) {
 // ─────────────────────────────────────────────────────────────────────────────
 const MUSCLE_GROUPS = ["Borst","Rug","Benen","Schouders","Armen","Core","Full body"];
 const DEFAULT_EQUIPMENT = [
-  { id:"eq1", name:"Dumbbells", exercises:[
-    {id:"e1",name:"Dumbbell bench press",muscles:["Borst"]},{id:"e2",name:"Dumbbell incline press",muscles:["Borst"]},
-    {id:"e3",name:"Dumbbell fly",muscles:["Borst"]},{id:"e4",name:"Dumbbell row",muscles:["Rug"]},
-    {id:"e5",name:"Dumbbell RDL",muscles:["Benen"]},{id:"e6",name:"Dumbbell goblet squat",muscles:["Benen"]},
-    {id:"e7",name:"Dumbbell lunge",muscles:["Benen"]},{id:"e8",name:"Lateral raise",muscles:["Schouders"]},
-    {id:"e9",name:"Dumbbell shoulder press",muscles:["Schouders"]},{id:"e10",name:"Dumbbell curl",muscles:["Armen"]},
-    {id:"e11",name:"Dumbbell tricep kickback",muscles:["Armen"]},{id:"e12",name:"Dumbbell shrug",muscles:["Rug"]},
+  { id:"eq1", name:"Dumbbells (t/m 40kg)", exercises:[
+    // Borst
+    {id:"d1",name:"Dumbbell bench press",muscles:["Borst"]},
+    {id:"d2",name:"Dumbbell incline press",muscles:["Borst"]},
+    {id:"d3",name:"Dumbbell fly",muscles:["Borst"]},
+    {id:"d4",name:"Dumbbell incline fly",muscles:["Borst"]},
+    // Rug
+    {id:"d5",name:"Dumbbell row (1 arm)",muscles:["Rug"]},
+    {id:"d6",name:"Dumbbell renegade row",muscles:["Rug","Core"]},
+    {id:"d7",name:"Dumbbell shrug",muscles:["Rug"]},
+    {id:"d8",name:"Dumbbell pullover",muscles:["Rug","Borst"]},
+    // Benen
+    {id:"d9",name:"Dumbbell RDL",muscles:["Benen"]},
+    {id:"d10",name:"Dumbbell goblet squat",muscles:["Benen"]},
+    {id:"d11",name:"Dumbbell lunge",muscles:["Benen"]},
+    {id:"d12",name:"Dumbbell split squat",muscles:["Benen"]},
+    {id:"d13",name:"Dumbbell step-up",muscles:["Benen"]},
+    {id:"d14",name:"Dumbbell hip thrust",muscles:["Benen"]},
+    {id:"d15",name:"Dumbbell calf raise",muscles:["Benen"]},
+    // Schouders
+    {id:"d16",name:"Dumbbell shoulder press",muscles:["Schouders"]},
+    {id:"d17",name:"Lateral raise",muscles:["Schouders"]},
+    {id:"d18",name:"Front raise",muscles:["Schouders"]},
+    {id:"d19",name:"Dumbbell reverse fly",muscles:["Schouders","Rug"]},
+    {id:"d20",name:"Arnold press",muscles:["Schouders"]},
+    // Armen
+    {id:"d21",name:"Dumbbell curl",muscles:["Armen"]},
+    {id:"d22",name:"Hammer curl",muscles:["Armen"]},
+    {id:"d23",name:"Incline curl",muscles:["Armen"]},
+    {id:"d24",name:"Dumbbell tricep kickback",muscles:["Armen"]},
+    {id:"d25",name:"Dumbbell overhead tricep extension",muscles:["Armen"]},
+    {id:"d26",name:"Dumbbell skullcrusher",muscles:["Armen"]},
   ]},
-  { id:"eq2", name:"Barbell", exercises:[
-    {id:"e20",name:"Barbell squat",muscles:["Benen"]},{id:"e21",name:"Barbell deadlift",muscles:["Benen","Rug"]},
-    {id:"e22",name:"Barbell bench press",muscles:["Borst"]},{id:"e23",name:"Barbell overhead press",muscles:["Schouders"]},
-    {id:"e24",name:"Barbell row",muscles:["Rug"]},{id:"e25",name:"Barbell hip thrust",muscles:["Benen"]},
-    {id:"e26",name:"Barbell RDL",muscles:["Benen","Rug"]},{id:"e27",name:"Barbell curl",muscles:["Armen"]},
+  { id:"eq2", name:"Squat rack + Barbell", exercises:[
+    // Benen
+    {id:"b1",name:"Barbell squat",muscles:["Benen"]},
+    {id:"b2",name:"Front squat",muscles:["Benen"]},
+    {id:"b3",name:"Barbell RDL",muscles:["Benen","Rug"]},
+    {id:"b4",name:"Barbell deadlift",muscles:["Benen","Rug"]},
+    {id:"b5",name:"Barbell hip thrust",muscles:["Benen"]},
+    {id:"b6",name:"Barbell lunge",muscles:["Benen"]},
+    {id:"b7",name:"Good morning",muscles:["Benen","Rug"]},
+    // Rug
+    {id:"b8",name:"Barbell row",muscles:["Rug"]},
+    {id:"b9",name:"Pendlay row",muscles:["Rug"]},
+    {id:"b10",name:"Rack pull",muscles:["Rug","Benen"]},
+    // Borst
+    {id:"b11",name:"Barbell bench press",muscles:["Borst"]},
+    {id:"b12",name:"Barbell incline bench press",muscles:["Borst"]},
+    // Schouders
+    {id:"b13",name:"Barbell overhead press",muscles:["Schouders"]},
+    {id:"b14",name:"Push press",muscles:["Schouders"]},
+    // Armen
+    {id:"b15",name:"Barbell curl",muscles:["Armen"]},
+    {id:"b16",name:"Close grip bench press",muscles:["Armen","Borst"]},
+    // Squat rack als rek
+    {id:"b17",name:"Pull-up",muscles:["Rug"]},
+    {id:"b18",name:"Chin-up",muscles:["Rug","Armen"]},
+    {id:"b19",name:"Hanging knee raise",muscles:["Core"]},
+    {id:"b20",name:"Hanging leg raise",muscles:["Core"]},
+    {id:"b21",name:"Dead hang",muscles:["Rug"]},
   ]},
-  { id:"eq3", name:"Kabelstation", exercises:[
-    {id:"e40",name:"Cable row",muscles:["Rug"]},{id:"e41",name:"Cable pulldown",muscles:["Rug"]},
-    {id:"e42",name:"Face pull",muscles:["Schouders","Rug"]},{id:"e43",name:"Cable fly",muscles:["Borst"]},
-    {id:"e44",name:"Tricep pushdown",muscles:["Armen"]},{id:"e45",name:"Cable curl",muscles:["Armen"]},
-    {id:"e46",name:"Cable lateral raise",muscles:["Schouders"]},{id:"e48",name:"Cable woodchop",muscles:["Core"]},
+  { id:"eq3", name:"Lat pull-down", exercises:[
+    // Rug
+    {id:"l1",name:"Lat pulldown breed grip",muscles:["Rug"]},
+    {id:"l2",name:"Lat pulldown smal grip",muscles:["Rug"]},
+    {id:"l3",name:"Lat pulldown underhand grip",muscles:["Rug","Armen"]},
+    {id:"l4",name:"Lat pulldown neutral grip",muscles:["Rug"]},
+    {id:"l5",name:"Straight arm pulldown",muscles:["Rug"]},
+    {id:"l6",name:"Seated cable row breed",muscles:["Rug"]},
+    {id:"l7",name:"Seated cable row smal",muscles:["Rug"]},
+    {id:"l8",name:"Single arm cable row",muscles:["Rug"]},
+    // Schouders/rug
+    {id:"l9",name:"Face pull",muscles:["Schouders","Rug"]},
+    {id:"l10",name:"Cable rear delt fly",muscles:["Schouders","Rug"]},
+    // Borst
+    {id:"l11",name:"Cable fly laag naar hoog",muscles:["Borst"]},
+    {id:"l12",name:"Cable fly hoog naar laag",muscles:["Borst"]},
+    // Armen
+    {id:"l13",name:"Cable bicep curl",muscles:["Armen"]},
+    {id:"l14",name:"Cable hammer curl",muscles:["Armen"]},
+    {id:"l15",name:"Cable tricep pushdown",muscles:["Armen"]},
+    {id:"l16",name:"Cable overhead tricep extension",muscles:["Armen"]},
+    {id:"l17",name:"Cable lateral raise",muscles:["Schouders"]},
+    // Core
+    {id:"l18",name:"Cable woodchop",muscles:["Core"]},
+    {id:"l19",name:"Cable crunch",muscles:["Core"]},
   ]},
-  { id:"eq4", name:"Pull-up bar", exercises:[
-    {id:"e60",name:"Pull-up",muscles:["Rug"]},{id:"e61",name:"Chin-up",muscles:["Rug","Armen"]},
-    {id:"e62",name:"Hanging knee raise",muscles:["Core"]},{id:"e63",name:"Dead hang",muscles:["Rug"]},
+  { id:"eq4", name:"Leg press", exercises:[
+    {id:"lp1",name:"Leg press (breed, voeten hoog)",muscles:["Benen"]},
+    {id:"lp2",name:"Leg press (smal, voeten laag)",muscles:["Benen"]},
+    {id:"lp3",name:"Leg press (één been)",muscles:["Benen"]},
+    {id:"lp4",name:"Calf raise op leg press",muscles:["Benen"]},
   ]},
-  { id:"eq5", name:"Kettlebells", exercises:[
-    {id:"e70",name:"Kettlebell swing",muscles:["Benen","Rug"]},{id:"e71",name:"Kettlebell goblet squat",muscles:["Benen"]},
-    {id:"e72",name:"Turkish get-up",muscles:["Full body"]},{id:"e73",name:"Kettlebell press",muscles:["Schouders"]},
-    {id:"e74",name:"Kettlebell row",muscles:["Rug"]},
+  { id:"eq5", name:"Leg extension / Leg curl", exercises:[
+    {id:"le1",name:"Leg extension",muscles:["Benen"]},
+    {id:"le2",name:"Leg curl (liggend)",muscles:["Benen"]},
+    {id:"le3",name:"Leg curl (één been)",muscles:["Benen"]},
   ]},
-  { id:"eq6", name:"Bench", exercises:[
-    {id:"e80",name:"Dip",muscles:["Armen","Borst"]},{id:"e81",name:"Step-up",muscles:["Benen"]},
-    {id:"e82",name:"Bulgarian split squat",muscles:["Benen"]},{id:"e83",name:"Box jump",muscles:["Benen"]},
+  { id:"eq6", name:"Kettlebells", exercises:[
+    {id:"k1",name:"Kettlebell swing",muscles:["Benen","Rug"]},
+    {id:"k2",name:"Kettlebell goblet squat",muscles:["Benen"]},
+    {id:"k3",name:"Kettlebell deadlift",muscles:["Benen","Rug"]},
+    {id:"k4",name:"Kettlebell Turkish get-up",muscles:["Full body"]},
+    {id:"k5",name:"Kettlebell press",muscles:["Schouders"]},
+    {id:"k6",name:"Kettlebell row",muscles:["Rug"]},
+    {id:"k7",name:"Kettlebell lunge",muscles:["Benen"]},
+    {id:"k8",name:"Kettlebell halo",muscles:["Schouders","Core"]},
   ]},
-  { id:"eq7", name:"Mat / Bodyweight", exercises:[
-    {id:"e90",name:"Push-up",muscles:["Borst"]},{id:"e91",name:"Plank",muscles:["Core"]},
-    {id:"e92",name:"Side plank",muscles:["Core"]},{id:"e93",name:"Hip thrust (bodyweight)",muscles:["Benen"]},
-    {id:"e94",name:"Glute bridge",muscles:["Benen"]},{id:"e95",name:"Mountain climber",muscles:["Core","Full body"]},
-    {id:"e96",name:"Burpee",muscles:["Full body"]},{id:"e97",name:"Sit-up",muscles:["Core"]},
-    {id:"e98",name:"Russian twist",muscles:["Core"]},
+  { id:"eq7", name:"Verstelbaar bankje", exercises:[
+    {id:"bk1",name:"Dip (aan bankje)",muscles:["Armen","Borst"]},
+    {id:"bk2",name:"Bulgarian split squat",muscles:["Benen"]},
+    {id:"bk3",name:"Step-up",muscles:["Benen"]},
+    {id:"bk4",name:"Decline push-up",muscles:["Borst"]},
+    {id:"bk5",name:"Incline curl (op bankje)",muscles:["Armen"]},
+    {id:"bk6",name:"Hip thrust (op bankje)",muscles:["Benen"]},
+  ]},
+  { id:"eq8", name:"Mat / Bodyweight", exercises:[
+    {id:"m1",name:"Push-up",muscles:["Borst"]},
+    {id:"m2",name:"Diamond push-up",muscles:["Armen","Borst"]},
+    {id:"m3",name:"Pike push-up",muscles:["Schouders"]},
+    {id:"m4",name:"Plank",muscles:["Core"]},
+    {id:"m5",name:"Side plank",muscles:["Core"]},
+    {id:"m6",name:"Hollow body hold",muscles:["Core"]},
+    {id:"m7",name:"Dead bug",muscles:["Core"]},
+    {id:"m8",name:"Glute bridge",muscles:["Benen"]},
+    {id:"m9",name:"Hip thrust (bodyweight)",muscles:["Benen"]},
+    {id:"m10",name:"Bodyweight squat",muscles:["Benen"]},
+    {id:"m11",name:"Reverse lunge",muscles:["Benen"]},
+    {id:"m12",name:"Mountain climber",muscles:["Core","Full body"]},
+    {id:"m13",name:"Burpee",muscles:["Full body"]},
+    {id:"m14",name:"Superman",muscles:["Rug"]},
+    {id:"m15",name:"Bird dog",muscles:["Core","Rug"]},
   ]},
 ];
 
@@ -201,7 +297,7 @@ const fmtShort = (iso) => { if(!iso) return ""; return new Date(iso+(iso.length=
 const uid = () => Date.now().toString()+Math.random().toString(36).slice(2);
 
 const blankClient   = () => ({id:uid(),name:"",goal:"algemeen",frequency:"",injuries:"",preferredExercises:"",dislikedExercises:"",currentFocus:"",notes:"",createdAt:new Date().toISOString(),trainings:[],aiAnalyses:[]});
-const blankExercise = () => ({id:uid(),name:"",sets:"",reps:"",weight:"",rpe:"",technique:"",note:"",setData:[]});
+const blankExercise = () => ({id:uid(),name:"",sets:"",reps:"",weight:"",rpe:"",technique:"",note:"",setData:[blankSet()]});
 const blankSet = () => ({id:uid(),reps:"",weight:"",rpe:""});
 const blankTraining = () => ({id:uid(),date:new Date().toISOString().slice(0,10),energy:"",complaints:"",notes:"",nextFocus:"",exercises:[blankExercise()]});
 
@@ -309,6 +405,7 @@ export default function App() {
   const [clients,        setClients]        = useState([]);
   const [equipment,      setEquipment]      = useState([]);
   const [loading,        setLoading]        = useState(true);
+  const [trainerId,      setTrainerId]      = useState(() => localStorage.getItem("pt_trainer_id") || null);
   const [view,           setView]           = useState("dashboard");
   const [clientId,       setClientId]       = useState(null);
   const [trainingId,     setTrainingId]     = useState(null);
@@ -319,10 +416,11 @@ export default function App() {
 
   // Initial load
   useEffect(() => {
+    if (!trainerId) return; // wacht op trainer selectie
     (async () => {
       try {
         setLoading(true);
-        const [clientRows, eqRows] = await Promise.all([db.getClients(), db.getEquipment()]);
+        const [clientRows, eqRows] = await Promise.all([db.getClients(trainerId), db.getEquipment()]);
         // Load trainings for each client
         const clientsWithTrainings = await Promise.all(
           (clientRows ?? []).map(async (row) => {
@@ -356,7 +454,7 @@ export default function App() {
   const saveClient = async (data) => {
     try {
       const isNew = !clients.find(c=>c.id===data.id);
-      const clientData = isNew ? {...blankClient(),...data,id:uid(),createdAt:new Date().toISOString()} : {...data};
+      const clientData = isNew ? {...blankClient(),...data,id:uid(),createdAt:new Date().toISOString(),trainerId} : {...data,trainerId};
       if (isNew) { await db.insertClient(clientData); } else { await db.updateClient(clientData); }
       if (isNew) {
         setClients(p=>[{...clientData,trainings:[]},...p]);
@@ -450,6 +548,34 @@ export default function App() {
 
   const filtered = clients.filter(c=>c.name.toLowerCase().includes(search.toLowerCase()));
 
+  const selectTrainer = (id) => {
+    localStorage.setItem("pt_trainer_id", id);
+    setTrainerId(id);
+  };
+
+  if (!trainerId) return (
+    <div style={{...T.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh"}}>
+      <div style={{textAlign:"center",padding:40}}>
+        <div style={{fontSize:40,marginBottom:16}}>▲</div>
+        <div style={{fontWeight:800,fontSize:22,color:C.text,marginBottom:8,letterSpacing:"-0.03em"}}>
+          PT <span style={{color:C.accent}}>Progress</span> Tracker
+        </div>
+        <div style={{fontSize:14,color:C.textMid,marginBottom:36}}>Wie ben jij?</div>
+        <div style={{display:"flex",gap:16,justifyContent:"center",flexWrap:"wrap"}}>
+          {[{id:"teun",name:"Teun",emoji:"💪"},{id:"thijs",name:"Thijs",emoji:"🏋️"}].map(t=>(
+            <button key={t.id} style={{...T.btnPrimary,fontSize:16,padding:"16px 36px",borderRadius:12,display:"flex",flexDirection:"column",alignItems:"center",gap:8,background:C.surface,border:`2px solid ${C.border}`,color:C.text,cursor:"pointer"}}
+              onClick={()=>selectTrainer(t.id)}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor=C.accent;e.currentTarget.style.background=C.accentDim;}}
+              onMouseLeave={e=>{e.currentTarget.style.borderColor=C.border;e.currentTarget.style.background=C.surface;}}>
+              <span style={{fontSize:32}}>{t.emoji}</span>
+              <span style={{fontWeight:700,fontSize:16}}>{t.name}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
   if (loading) return (
     <div style={T.app}>
       <header style={T.header}>
@@ -470,7 +596,11 @@ export default function App() {
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           {client&&view!=="dashboard"&&<span style={{fontSize:12,color:C.textLow,marginRight:4}}>{client.name}</span>}
           <button style={{background:"transparent",color:view==="dashboard"?C.accent:C.textMid,border:"none",cursor:"pointer",fontSize:13,fontWeight:view==="dashboard"?700:500,fontFamily:"inherit"}} onClick={()=>go("dashboard")}>Dashboard</button>
-          <button style={{background:"transparent",color:view==="settings"?C.accent:C.textMid,border:"none",cursor:"pointer",fontSize:13,fontWeight:view==="settings"?700:500,fontFamily:"inherit"}} onClick={()=>go("settings")}>⚙ Instellingen</button>
+          <button style={{background:"transparent",color:view==="settings"?C.accent:C.textMid,border:"none",cursor:"pointer",fontSize:13,fontWeight:view==="settings"?700:500,fontFamily:"inherit"}} onClick={()=>go("settings")}>⚙</button>
+          <button style={{background:C.accentDim,color:C.accent,border:`1px solid ${C.accentDim}`,borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit",padding:"4px 10px"}}
+            onClick={()=>{localStorage.removeItem("pt_trainer_id");setTrainerId(null);go("dashboard");}}>
+            {trainerId==="teun"?"Teun":"Thijs"} ↓
+          </button>
         </div>
       </header>
       <main style={T.main}>
@@ -780,9 +910,9 @@ function ExerciseBlock({ex,idx,canRemove,onRemove,onChange,onSetChange,onAddSet,
                         onChange={e=>onSetChange(s.id,"weight",e.target.value)} />
                     </td>
                     <td style={T.td}>
-                      <select style={{...T.select,padding:"6px 8px"}} value={s.rpe} onChange={e=>onSetChange(s.id,"rpe",e.target.value)}>
+                      <select style={{...T.select,padding:"6px 8px",color:s.rpe?rpeColor(s.rpe):C.textMid,fontWeight:s.rpe?700:400}} value={s.rpe} onChange={e=>onSetChange(s.id,"rpe",e.target.value)}>
                         <option value="">—</option>
-                        {[6,7,8,9,10].map(n=><option key={n} value={n}>{n}</option>)}
+                        {[1,2,3,4,5,6,7,8,9,10].map(n=><option key={n} value={n} style={{color:C.text,fontWeight:400}}>{n}</option>)}
                       </select>
                     </td>
                     <td style={T.td}>
@@ -888,13 +1018,34 @@ function TrainingForm({client,training,equipment,onSave,onCancel,toast}) {
                 {aiSugs&&aiSugs.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:8}}>{aiSugs.map((s,i)=>{const already=usedNames.has(s.name.toLowerCase());return(<button key={i} title={s.reason} style={{background:already?"#1a2236":C.accentDim,color:already?C.textLow:C.accent,border:`1px solid ${already?C.border:C.accent+"55"}`,borderRadius:7,padding:"7px 12px",cursor:already?"default":"pointer",fontSize:12,fontWeight:600,fontFamily:"inherit",opacity:already?0.5:1}} onClick={()=>!already&&pickExercise(s.name)}>{already?"✓ ":""}{s.name}</button>);})}</div>}
                 {aiSugs&&<button style={{...T.btnGhost,color:C.textLow,fontSize:12,marginTop:8}} onClick={fetchAISuggestions}>↺ Nieuwe suggesties</button>}
               </div>
-              <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap"}}>
-                <select style={{...T.select,width:"auto",padding:"6px 10px",fontSize:12}} value={muscleFilter} onChange={e=>setMuscleFilter(e.target.value)}>{["Alle",...MUSCLE_GROUPS].map(m=><option key={m} value={m}>{m}</option>)}</select>
-                <select style={{...T.select,width:"auto",padding:"6px 10px",fontSize:12}} value={eqFilter} onChange={e=>setEqFilter(e.target.value)}>{["Alle",...equipment.map(eq=>eq.name)].map(n=><option key={n} value={n}>{n}</option>)}</select>
+              {/* Spiergroep tabs */}
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+                {["Alle",...MUSCLE_GROUPS].map(m=>(
+                  <button key={m}
+                    style={{background:muscleFilter===m?C.accent:"transparent",color:muscleFilter===m?"#fff":C.textMid,border:`1px solid ${muscleFilter===m?C.accent:C.border}`,borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:muscleFilter===m?700:400,fontFamily:"inherit",whiteSpace:"nowrap"}}
+                    onClick={()=>setMuscleFilter(m)}>{m}
+                  </button>
+                ))}
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:8}}>
-                {filteredExercises.map(ex=>{const already=usedNames.has(ex.name.toLowerCase());return(<button key={ex.id} style={{background:already?C.accentDim:"#1a2236",color:already?C.accent:C.textMid,border:`1px solid ${already?C.accent+"55":C.border}`,borderRadius:8,padding:"9px 12px",cursor:already?"default":"pointer",fontSize:12,fontWeight:already?700:500,fontFamily:"inherit",textAlign:"left",lineHeight:1.3}} onClick={()=>!already&&pickExercise(ex.name)}>{already&&<span style={{marginRight:4}}>✓</span>}{ex.name}<div style={{fontSize:10,color:C.textLow,marginTop:2}}>{ex.equipment}</div></button>);})}
-              </div>
+              {/* Per apparaat, gefilterd op spiergroep */}
+              {equipment.filter(eq=>eq.exercises.some(ex=>muscleFilter==="Alle"||ex.muscles.includes(muscleFilter))).map(eq=>{
+                const exs=eq.exercises.filter(ex=>muscleFilter==="Alle"||ex.muscles.includes(muscleFilter));
+                if(!exs.length) return null;
+                return (
+                  <div key={eq.id} style={{marginBottom:14}}>
+                    <div style={{fontSize:11,fontWeight:700,color:C.textLow,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:8,paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{eq.name}</div>
+                    <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                      {exs.map(ex=>{const already=usedNames.has(ex.name.toLowerCase());return(
+                        <button key={ex.id}
+                          style={{background:already?C.accentDim:"#1a2236",color:already?C.accent:C.textMid,border:`1px solid ${already?C.accent+"55":C.border}`,borderRadius:20,padding:"6px 14px",cursor:already?"default":"pointer",fontSize:12,fontWeight:already?700:500,fontFamily:"inherit",whiteSpace:"nowrap"}}
+                          onClick={()=>!already&&pickExercise(ex.name)}>
+                          {already&&"✓ "}{ex.name}
+                        </button>
+                      );})}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
           {form.exercises.map((ex,idx)=>(
@@ -1190,11 +1341,35 @@ function GroupTraining({clients,equipment,onSave,onCancel,toast}) {
                   {aiSugs[activeTab]?.length>0&&(<div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:8}}>{aiSugs[activeTab].map((s,i)=>{const used=new Set(form.exercises.map(e=>e.name.toLowerCase()).filter(Boolean));const already=used.has(s.name.toLowerCase());return(<button key={i} title={s.reason} style={{background:already?"#1a2236":C.accentDim,color:already?C.textLow:C.accent,border:`1px solid ${already?C.border:C.accent+"55"}`,borderRadius:7,padding:"7px 12px",cursor:already?"default":"pointer",fontSize:12,fontWeight:600,fontFamily:"inherit",opacity:already?0.5:1}} onClick={()=>!already&&pickExercise(activeTab,s.name)}>{already?"✓ ":""}{s.name}</button>);})}</div>)}
                   {aiSugs[activeTab]&&<button style={{...T.btnGhost,color:C.textLow,fontSize:12}} onClick={()=>fetchAISuggestions(activeTab)}>↺ Nieuwe suggesties</button>}
                 </div>
-                <div style={{display:"flex",gap:10,marginBottom:12,flexWrap:"wrap"}}>
-                  <select style={{...T.select,width:"auto",padding:"6px 10px",fontSize:12}} value={muscleFilter} onChange={e=>setMuscleFilter(e.target.value)}>{["Alle",...MUSCLE_GROUPS].map(m=><option key={m} value={m}>{m}</option>)}</select>
-                  <select style={{...T.select,width:"auto",padding:"6px 10px",fontSize:12}} value={eqFilter} onChange={e=>setEqFilter(e.target.value)}>{["Alle",...equipment.map(eq=>eq.name)].map(n=><option key={n} value={n}>{n}</option>)}</select>
+                {/* Spiergroep tabs */}
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+                  {["Alle",...MUSCLE_GROUPS].map(m=>(
+                    <button key={m}
+                      style={{background:muscleFilter===m?C.accent:"transparent",color:muscleFilter===m?"#fff":C.textMid,border:`1px solid ${muscleFilter===m?C.accent:C.border}`,borderRadius:20,padding:"5px 12px",cursor:"pointer",fontSize:12,fontWeight:muscleFilter===m?700:400,fontFamily:"inherit",whiteSpace:"nowrap"}}
+                      onClick={()=>setMuscleFilter(m)}>{m}
+                    </button>
+                  ))}
                 </div>
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))",gap:8}}>{filteredExercises.map(ex=>{const used=new Set(form.exercises.map(e=>e.name.toLowerCase()).filter(Boolean));const already=used.has(ex.name.toLowerCase());return(<button key={ex.id} style={{background:already?C.accentDim:"#1a2236",color:already?C.accent:C.textMid,border:`1px solid ${already?C.accent+"55":C.border}`,borderRadius:8,padding:"9px 12px",cursor:already?"default":"pointer",fontSize:12,fontWeight:already?700:500,fontFamily:"inherit",textAlign:"left",lineHeight:1.3}} onClick={()=>!already&&pickExercise(activeTab,ex.name)}>{already&&<span style={{marginRight:4}}>✓</span>}{ex.name}<div style={{fontSize:10,color:C.textLow,marginTop:2}}>{ex.equipment}</div></button>);})}</div>
+                {/* Per apparaat */}
+                {equipment.filter(eq=>eq.exercises.some(ex=>muscleFilter==="Alle"||ex.muscles.includes(muscleFilter))).map(eq=>{
+                  const exs=eq.exercises.filter(ex=>muscleFilter==="Alle"||ex.muscles.includes(muscleFilter));
+                  if(!exs.length) return null;
+                  const used=new Set(form.exercises.map(e=>e.name.toLowerCase()).filter(Boolean));
+                  return (
+                    <div key={eq.id} style={{marginBottom:14}}>
+                      <div style={{fontSize:11,fontWeight:700,color:C.textLow,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6,paddingBottom:4,borderBottom:`1px solid ${C.border}`}}>{eq.name}</div>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                        {exs.map(ex=>{const already=used.has(ex.name.toLowerCase());return(
+                          <button key={ex.id}
+                            style={{background:already?C.accentDim:"#1a2236",color:already?C.accent:C.textMid,border:`1px solid ${already?C.accent+"55":C.border}`,borderRadius:20,padding:"6px 14px",cursor:already?"default":"pointer",fontSize:12,fontWeight:already?700:500,fontFamily:"inherit",whiteSpace:"nowrap"}}
+                            onClick={()=>!already&&pickExercise(activeTab,ex.name)}>
+                            {already&&"✓ "}{ex.name}
+                          </button>
+                        );})}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
             {form.exercises.map((ex,idx)=>(
