@@ -65,6 +65,7 @@ const db = {
       injuries: c.injuries, preferred_exercises: c.preferredExercises,
       disliked_exercises: c.dislikedExercises, current_focus: c.currentFocus,
       notes: c.notes, ai_analyses: c.aiAnalyses ?? [],
+      trainer_id: c.trainerId,
     }),
   }),
   deleteClient: (id) => sbFetch(`clients?id=eq.${id}`, { method: "DELETE", prefer: "" }),
@@ -415,23 +416,22 @@ export default function App() {
   const [search,         setSearch]         = useState("");
   const {toasts,add:toast} = useToast();
 
-  // Initial load
+  // Initial load - herlaadt bij trainer wissel
   useEffect(() => {
-    if (!trainerId) return; // wacht op trainer selectie
+    if (!trainerId) { setClients([]); return; }
     (async () => {
       try {
         setLoading(true);
+        setClients([]); // reset bij trainer wissel
         const [clientRows, eqRows] = await Promise.all([db.getClients(trainerId), db.getEquipment()]);
-        // Load trainings for each client
-        const clientsWithTrainings = await Promise.all(
+        const clientsWithData = await Promise.all(
           (clientRows ?? []).map(async (row) => {
             const [tRows, iRows] = await Promise.all([db.getTrainings(row.id), db.getInbody(row.id)]);
             return rowToClient(row, (tRows ?? []).map(rowToTraining), (iRows ?? []).map(rowToInbody));
           })
         );
-        setClients(clientsWithTrainings);
+        setClients(clientsWithData);
         if ((eqRows ?? []).length === 0) {
-          // First time: seed default equipment
           for (const eq of DEFAULT_EQUIPMENT) await db.upsertEquipment(eq);
           setEquipment(DEFAULT_EQUIPMENT);
         } else {
@@ -439,12 +439,12 @@ export default function App() {
         }
       } catch(e) {
         console.error(e);
-        toast("Verbinding mislukt — controleer je internetverbinding", "error");
+        toast("Verbinding mislukt", "error");
       } finally {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [trainerId]); // <-- trainerId als dependency: herlaadt bij wisselen
 
   const client   = clients.find(c=>c.id===clientId)??null;
   const training = client?.trainings?.find(t=>t.id===trainingId)??null;
@@ -459,12 +459,16 @@ export default function App() {
       const clientData = isNew ? {...blankClient(),...data,id:uid(),createdAt:new Date().toISOString(),trainerId:clientTrainer} : {...data,trainerId:clientTrainer};
       if (isNew) { await db.insertClient(clientData); } else { await db.updateClient(clientData); }
       if (isNew) {
+        // Alleen aan lokale lijst toevoegen als klant bij huidige trainer hoort
         if (clientTrainer === trainerId) {
           setClients(p=>[{...clientData,trainings:[],inbody:[]},...p]);
+          setClientId(clientData.id);
+          go("profile", clientData.id);
+        } else {
+          // Klant aangemaakt voor andere trainer - terug naar dashboard
+          go("dashboard");
         }
-        setClientId(clientData.id);
         toast("Klant aangemaakt");
-        go("profile", clientData.id);
       } else {
         setClients(p=>p.map(c=>c.id===clientData.id?{...c,...clientData}:c));
         toast("Klant opgeslagen");
@@ -556,6 +560,9 @@ export default function App() {
   const selectTrainer = (id) => {
     localStorage.setItem("pt_trainer_id", id);
     setTrainerId(id);
+    setView("dashboard");
+    setClientId(null);
+    setTrainingId(null);
   };
 
   if (!trainerId) return (
@@ -603,8 +610,8 @@ export default function App() {
           <button style={{background:"transparent",color:view==="dashboard"?C.accent:C.textMid,border:"none",cursor:"pointer",fontSize:13,fontWeight:view==="dashboard"?700:500,fontFamily:"inherit"}} onClick={()=>go("dashboard")}>Dashboard</button>
           <button style={{background:"transparent",color:view==="settings"?C.accent:C.textMid,border:"none",cursor:"pointer",fontSize:13,fontWeight:view==="settings"?700:500,fontFamily:"inherit"}} onClick={()=>go("settings")}>⚙</button>
           <button style={{background:C.accentDim,color:C.accent,border:`1px solid ${C.accentDim}`,borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"inherit",padding:"4px 10px"}}
-            onClick={()=>{localStorage.removeItem("pt_trainer_id");setTrainerId(null);go("dashboard");}}>
-            {trainerId==="teun"?"Teun":"Thijs"} ↓
+            onClick={()=>{localStorage.removeItem("pt_trainer_id");setTrainerId(null);setClients([]);setView("dashboard");setClientId(null);}}>
+            {trainerId==="teun"?"💪 Teun":"🏋️ Thijs"} ↓
           </button>
         </div>
       </header>
