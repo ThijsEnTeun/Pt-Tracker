@@ -45,6 +45,7 @@ async function callClaude(messages, maxTokens = 1500) {
 const db = {
   // Clients
   getClients: (trainerId) => sbFetch(`clients?select=*&trainer_id=eq.${trainerId}&order=created_at.desc`),
+  getAllClients: () => sbFetch("clients?select=*&order=created_at.desc"),
   insertClient: (c) => sbFetch("clients", {
     method: "POST",
     headers: { "Prefer": "return=representation" },
@@ -454,17 +455,21 @@ export default function App() {
   const saveClient = async (data) => {
     try {
       const isNew = !clients.find(c=>c.id===data.id);
-      const clientData = isNew ? {...blankClient(),...data,id:uid(),createdAt:new Date().toISOString(),trainerId} : {...data,trainerId};
+      const clientTrainer = data.trainerId || trainerId || "teun";
+      const clientData = isNew ? {...blankClient(),...data,id:uid(),createdAt:new Date().toISOString(),trainerId:clientTrainer} : {...data,trainerId:clientTrainer};
       if (isNew) { await db.insertClient(clientData); } else { await db.updateClient(clientData); }
       if (isNew) {
-        setClients(p=>[{...clientData,trainings:[]},...p]);
+        if (clientTrainer === trainerId) {
+          setClients(p=>[{...clientData,trainings:[],inbody:[]},...p]);
+        }
         setClientId(clientData.id);
         toast("Klant aangemaakt");
+        go("profile", clientData.id);
       } else {
         setClients(p=>p.map(c=>c.id===clientData.id?{...c,...clientData}:c));
         toast("Klant opgeslagen");
+        go("profile", clientData.id);
       }
-      go("profile", clientData.id);
     } catch(e) { toast("Opslaan mislukt","error"); }
   };
   const deleteClient = async (id) => {
@@ -682,7 +687,8 @@ function Dashboard({clients,search,setSearch,onNew,onOpen,hovered,setHovered,onG
 // CLIENT FORM
 // ─────────────────────────────────────────────────────────────────────────────
 function ClientForm({initial,onSave,onCancel}) {
-  const [form,setForm] = useState(initial??{name:"",goal:"algemeen",frequency:"",injuries:"",preferredExercises:"",dislikedExercises:"",currentFocus:"",notes:""});
+  const currentTrainer = localStorage.getItem("pt_trainer_id") || "teun";
+  const [form,setForm] = useState(initial??{name:"",goal:"algemeen",frequency:"",injuries:"",preferredExercises:"",dislikedExercises:"",currentFocus:"",notes:"",trainerId:currentTrainer});
   const set=(k,v)=>setForm(p=>({...p,[k]:v}));
   return (
     <>
@@ -692,6 +698,18 @@ function ClientForm({initial,onSave,onCancel}) {
         <div style={T.formGrid}>
           <div style={T.fg}><label style={T.lbl}>Naam *</label><input style={T.input} value={form.name} placeholder="Volledige naam" onChange={e=>set("name",e.target.value)} /></div>
           <div style={T.fg}><label style={T.lbl}>Doel</label><select style={T.select} value={form.goal} onChange={e=>set("goal",e.target.value)}>{GOAL_OPTIONS.map(g=><option key={g.value} value={g.value}>{g.label}</option>)}</select></div>
+          <div style={T.fgFull}>
+            <label style={T.lbl}>Trainer</label>
+            <div style={{display:"flex",gap:10}}>
+              {[{id:"teun",label:"💪 Teun"},{id:"thijs",label:"🏋️ Thijs"}].map(t=>(
+                <button key={t.id} type="button"
+                  style={{flex:1,padding:"10px",borderRadius:8,border:`2px solid ${form.trainerId===t.id?C.accent:C.border}`,background:form.trainerId===t.id?C.accentDim:"transparent",color:form.trainerId===t.id?C.accent:C.textMid,cursor:"pointer",fontWeight:form.trainerId===t.id?700:500,fontSize:14,fontFamily:"inherit"}}
+                  onClick={()=>set("trainerId",t.id)}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
           <div style={T.fg}><label style={T.lbl}>Trainingsfrequentie (per week)</label><input style={T.input} value={form.frequency} placeholder="bijv. 3" onChange={e=>set("frequency",e.target.value)} /></div>
           <div style={T.fg}><label style={T.lbl}>Huidige focus</label><input style={T.input} value={form.currentFocus} placeholder="bijv. squat techniek" onChange={e=>set("currentFocus",e.target.value)} /></div>
           <div style={T.fgFull}><label style={T.lbl}>Blessures of klachten</label><input style={T.input} value={form.injuries} placeholder="bijv. knieklachten links" onChange={e=>set("injuries",e.target.value)} /></div>
